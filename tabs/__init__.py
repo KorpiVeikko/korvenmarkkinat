@@ -2,7 +2,6 @@ from . import oil
 from . import gold
 from . import bitcoin
 from . import realestate
-from . import forest
 from . import macro
 from . import wood
 from . import dashboard

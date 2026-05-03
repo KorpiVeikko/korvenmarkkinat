@@ -1,15 +1,11 @@
 # services/energy_correl.py
 from __future__ import annotations
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 
 def _to_monthly(df: pd.DataFrame, time_col: str = "Aika_dt") -> pd.DataFrame:
-    """
-    Varmistaa kuukausitason: käyttää Aika_dt ja ankkuroidaan kuukauden alkuun.
-    Huom: ei käytetä to_timestamp("MS"), koska joissain pandas-versioissa se ei ole tuettu.
-    """
     f = df.copy()
     if time_col not in f.columns:
         return pd.DataFrame()
@@ -28,21 +24,32 @@ def _to_monthly(df: pd.DataFrame, time_col: str = "Aika_dt") -> pd.DataFrame:
     return f
 
 
+def _col_like(columns: list[str], *needles: str) -> str | None:
+    for c in columns:
+        cu = str(c).upper()
+        if all(n.upper() in cu for n in needles):
+            return c
+    return None
+
+
 def build_electricity_features(
     electricity_df: pd.DataFrame,
     series_col: str,
-    unit: str = "GWh",
+    unit: str = "TWh",
 ) -> pd.DataFrame:
     """
     Rakentaa kuukausittaiset featuret sähködatasta vertailua varten.
 
-    Palauttaa (jos löydettävissä):
-    - total_consumption: kokonaiskulutus (GWh/TWh)
-    - import_net: nettotuonti (GWh/TWh)
-    - import_share: nettotuonnin osuus kokonaiskulutuksesta (0–1)
-    - wind_share, nuclear_share, hydro_share, solar_share: tuotantomuotojen osuus kokonaiskulutuksesta (0–1)
-
-    Huom: absoluuttisia tuotantomääriä ei palauteta (vain osuudet) selkeyden vuoksi.
+    Palauttaa:
+    - total_consumption
+    - total_production
+    - import_net
+    - import_share
+    - wind_share
+    - nuclear_share
+    - hydro_share
+    - solar_share
+    - chp_share
     """
     f = _to_monthly(electricity_df, "Aika_dt")
     if f.empty:
@@ -60,48 +67,57 @@ def build_electricity_features(
         f["Arvo"] = f["Arvo"] / 1000.0
 
     p = (
-        f.groupby(["Month", series_col], as_index=False)["Arvo"].sum()
+        f.groupby(["Month", series_col], as_index=False)["Arvo"]
+        .sum()
         .pivot(index="Month", columns=series_col, values="Arvo")
         .sort_index()
     )
     if p.empty:
         return pd.DataFrame()
 
-    def col_like(*needles: str) -> str | None:
-        cols = [str(c) for c in p.columns]
-        for c in cols:
-            cu = c.upper()
-            ok = True
-            for n in needles:
-                if n.upper() not in cu:
-                    ok = False
-                    break
-            if ok:
-                return c
-        return None
+    cols = [str(c) for c in p.columns]
 
-    total_col = col_like("SSS") or col_like("KOKONAISKULUTUS")
-    import_col = col_like("NETTOTUONTI") or col_like("2 SÄHKÖN")
+    total_consumption_col = (
+        _col_like(cols, "SSS")
+        or _col_like(cols, "KOKONAISKULUTUS")
+    )
+    total_production_col = (
+        _col_like(cols, "1 SÄHKÖN TUOTANTO")
+        or _col_like(cols, "KOKONAISTUOTANTO")
+    )
+    import_col = (
+        _col_like(cols, "NETTOTUONTI")
+        or _col_like(cols, "2 SÄHKÖN")
+    )
 
-    wind_col = col_like("TUULI")
-    nuclear_col = col_like("YDIN")
-    hydro_col = col_like("VESI")
-    solar_col = col_like("AURINKO")
+    wind_col = _col_like(cols, "TUULI")
+    nuclear_col = _col_like(cols, "YDIN")
+    hydro_col = _col_like(cols, "VESI")
+    solar_col = _col_like(cols, "AURINKO")
+    chp_col = (
+        _col_like(cols, "YHTEISTUOTANTO YHTEENSÄ")
+        or _col_like(cols, "1.5 YHTEISTUOTANTO")
+    )
 
     out = pd.DataFrame(index=p.index)
 
-    if total_col:
-        out["total_consumption"] = p[total_col]
+    if total_consumption_col:
+        out["total_consumption"] = p[total_consumption_col]
+    if total_production_col:
+        out["total_production"] = p[total_production_col]
     if import_col:
         out["import_net"] = p[import_col]
 
-    if "total_consumption" in out.columns:
+    denom = None
+    if "total_production" in out.columns:
+        denom = out["total_production"].replace(0, np.nan)
+    elif "total_consumption" in out.columns:
         denom = out["total_consumption"].replace(0, np.nan)
 
-        # ✅ tuonnin osuus (netto) kokonaiskulutuksesta
-        if "import_net" in out.columns:
-            out["import_share"] = out["import_net"] / denom
+    if "total_consumption" in out.columns and "import_net" in out.columns:
+        out["import_share"] = out["import_net"] / out["total_consumption"].replace(0, np.nan)
 
+    if denom is not None:
         if wind_col:
             out["wind_share"] = p[wind_col] / denom
         if nuclear_col:
@@ -110,18 +126,14 @@ def build_electricity_features(
             out["hydro_share"] = p[hydro_col] / denom
         if solar_col:
             out["solar_share"] = p[solar_col] / denom
-
-    if out.empty:
-        return pd.DataFrame()
+        if chp_col:
+            out["chp_share"] = p[chp_col] / denom
 
     out = out.reset_index().rename(columns={"index": "Month"})
     return out
 
 
 def build_price_series(price_df: pd.DataFrame, value_col: str = "Arvo") -> pd.DataFrame:
-    """
-    Yhtenäinen kuukausisarja hinnalle: palauttaa Month + price
-    """
     f = _to_monthly(price_df, "Aika_dt")
     if f.empty:
         return pd.DataFrame()
@@ -142,62 +154,85 @@ def build_price_series(price_df: pd.DataFrame, value_col: str = "Arvo") -> pd.Da
 def merge_price_and_features(price_series: pd.DataFrame, features: pd.DataFrame) -> pd.DataFrame:
     if price_series is None or features is None or price_series.empty or features.empty:
         return pd.DataFrame()
-    m = pd.merge(price_series, features, on="Month", how="inner").sort_values("Month")
-    return m
+    return pd.merge(price_series, features, on="Month", how="inner").sort_values("Month")
+
+
+def add_change_features(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """
+    Lisää muutosfeaturet:
+    - price_mom_pct: hinnan kuukausimuutos %
+    - *_diff_pp: osuuksien muutos prosenttiyksikköinä
+    - *_mom_pct: tasomuuttujien kuukausimuutos %
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    out = df.copy().sort_values("Month")
+
+    if "price" in out.columns:
+        out["price_mom_pct"] = out["price"].pct_change() * 100.0
+
+    for col in cols:
+        if col not in out.columns:
+            continue
+
+        if col.endswith("_share"):
+            out[f"{col}_diff_pp"] = (out[col] - out[col].shift(1)) * 100.0
+        else:
+            out[f"{col}_mom_pct"] = out[col].pct_change() * 100.0
+
+    return out
 
 
 def corr_table(df: pd.DataFrame, cols: list[str], method: str = "pearson") -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
+
     x = df[cols].dropna()
     if x.empty:
         return pd.DataFrame()
+
     return x.corr(method=method)
 
 
-def lag_corr(
+def pairwise_corr_to_target(
     df: pd.DataFrame,
-    x: str,
-    y: str,
-    max_lag: int = 12,
+    target: str,
+    features: list[str],
     method: str = "pearson",
 ) -> pd.DataFrame:
-    """
-    lag > 0 tarkoittaa: x(t-lag) vs y(t) (x "johtaa" y:tä)
-    """
-    if df is None or df.empty:
+    if df is None or df.empty or target not in df.columns:
         return pd.DataFrame()
 
-    out = []
-    base = df[["Month", x, y]].dropna().sort_values("Month")
-    if base.empty:
-        return pd.DataFrame()
+    rows = []
+    for feat in features:
+        if feat not in df.columns:
+            continue
 
-    for lag in range(0, max_lag + 1):
-        shifted = base.copy()
-        shifted[x] = shifted[x].shift(lag)
-        tmp = shifted[[x, y]].dropna()
+        tmp = df[[target, feat]].dropna()
         if len(tmp) < 8:
-            r = np.nan
+            corr = np.nan
         else:
-            r = tmp.corr(method=method).iloc[0, 1]
-        out.append({"lag_months": lag, "corr": r})
+            corr = tmp.corr(method=method).iloc[0, 1]
 
-    return pd.DataFrame(out)
+        rows.append({"feature": feat, "corr": corr, "n_obs": len(tmp)})
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+
+    out["abs_corr"] = out["corr"].abs()
+    return out.sort_values("abs_corr", ascending=False).drop(columns=["abs_corr"])
 
 
 def rolling_corr(
     df: pd.DataFrame,
     x: str,
     y: str,
-    window: int = 24,
+    window: int = 12,
     method: str = "pearson",
+    min_periods: int | None = None,
 ) -> pd.DataFrame:
-    """
-    Rullaava korrelaatio (ikkuna kk).
-    Huom: Rolling.corr() ei tue kaikissa pandas-versioissa method-parametria.
-    Spearman = Pearson(rank(x), rank(y))
-    """
     if df is None or df.empty:
         return pd.DataFrame()
 
@@ -210,8 +245,11 @@ def rolling_corr(
     if method.lower() == "spearman":
         s = s.rank()
 
-    rc = s[x].rolling(window=window).corr(s[y])
+    if min_periods is None:
+        min_periods = max(6, window // 2)
+
+    rc = s[x].rolling(window=window, min_periods=min_periods).corr(s[y])
 
     out = rc.reset_index()
     out.columns = ["Month", "corr"]
-    return out
+    return out.dropna(subset=["corr"])
