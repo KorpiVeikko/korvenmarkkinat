@@ -202,7 +202,8 @@ def fetch_price_history_debug(symbol: str, period: str = "5y") -> tuple[pd.DataF
     Palauttaa:
         (df, virheteksti)
 
-    Brent haetaan FREDistä.
+    Brent haetaan ensin FREDistä.
+    Jos FRED epäonnistuu, Brent haetaan Yahoo Financesta.
     Muut symbolit haetaan Yahoo Financesta.
     """
     if symbol == "BZ=F":
@@ -214,7 +215,9 @@ def fetch_price_history_debug(symbol: str, period: str = "5y") -> tuple[pd.DataF
         if not yahoo_df.empty:
             return yahoo_df, None
 
-    return pd.DataFrame(), msg or yahoo_msg
+        return pd.DataFrame(), msg or yahoo_msg
+
+    return _fetch_from_yahoo_debug(symbol=symbol, period=period)
 
 
 
