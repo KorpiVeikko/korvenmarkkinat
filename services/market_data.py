@@ -115,7 +115,7 @@ def _normalize_yfinance_df(df: pd.DataFrame) -> pd.DataFrame:
 def _fetch_from_fred_brent_debug(period: str) -> tuple[pd.DataFrame, str | None]:
     try:
         session = _build_session()
-        res = session.get(FRED_BRENT_CSV_URL, timeout=20)
+        res = session.get(FRED_BRENT_CSV_URL, timeout=45)
 
         status_code = res.status_code
         content_type = res.headers.get("Content-Type", "")
@@ -206,9 +206,16 @@ def fetch_price_history_debug(symbol: str, period: str = "5y") -> tuple[pd.DataF
     Muut symbolit haetaan Yahoo Financesta.
     """
     if symbol == "BZ=F":
-        return _fetch_from_fred_brent_debug(period=period)
+        df, msg = _fetch_from_fred_brent_debug(period=period)
+        if not df.empty:
+            return df, None
 
-    return _fetch_from_yahoo_debug(symbol=symbol, period=period)
+        yahoo_df, yahoo_msg = _fetch_from_yahoo_debug(symbol=symbol, period=period)
+        if not yahoo_df.empty:
+            return yahoo_df, None
+
+    return pd.DataFrame(), msg or yahoo_msg
+
 
 
 def fetch_price_history(symbol: str, period: str = "5y") -> pd.DataFrame:
