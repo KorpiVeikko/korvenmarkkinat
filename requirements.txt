@@ -52,3 +52,4 @@ watchdog==6.0.0
 websockets==16.0
 yfinance==1.2.0
 xlrd>=2.0.1
+python-dotenv
