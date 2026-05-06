@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from io import StringIO
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -13,10 +14,12 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
-
 ECB_API_BASE = "https://data-api.ecb.europa.eu/service/data/EXR"
 ECB_DATA_API_BASE = "https://data-api.ecb.europa.eu/service/data"
 FRED_CSV_BASE = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+
+DATA_CACHE_DIR = Path("data_cache")
+FRED_CACHE_DIR = DATA_CACHE_DIR / "fred"
 
 CURRENCY_META: dict[str, dict[str, str | None]] = {
     "EUR": {"name": "Euro", "country": None},
@@ -74,9 +77,9 @@ def _build_session() -> requests.Session:
     session = requests.Session()
 
     retry = Retry(
-        total=3,
-        connect=3,
-        read=3,
+        total=2,
+        connect=2,
+        read=2,
         backoff_factor=1.0,
         status_forcelist=(429, 500, 502, 503, 504),
         allowed_methods=frozenset(["GET"]),
@@ -127,9 +130,9 @@ def _empty_metrics(currency: str) -> FxMetrics:
     )
 
 
-def _safe_get(url: str, params: dict | None = None, timeout: int = 45) -> requests.Response:
+def _safe_get(url: str, params: dict | None = None, timeout: int = 30) -> requests.Response:
     session = _build_session()
-    r = session.get(url, params=params, timeout=(10, timeout))
+    r = session.get(url, params=params, timeout=(8, timeout))
     r.raise_for_status()
     return r
 
@@ -174,13 +177,61 @@ def _clean_fx_history(df: pd.DataFrame, currency: str) -> pd.DataFrame:
     return out[["Date", "Rate", "Currency"]].copy()
 
 
+def _fred_cache_path(series_id: str) -> Path:
+    safe_id = str(series_id).replace("/", "_").replace("\\", "_")
+    return FRED_CACHE_DIR / f"{safe_id}.csv"
+
+
+def _read_fred_cache(series_id: str) -> tuple[pd.DataFrame, str | None]:
+    path = _fred_cache_path(series_id)
+
+    if not path.exists():
+        return pd.DataFrame(columns=["Date", "Value"]), None
+
+    try:
+        df = pd.read_csv(path)
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df["Value"] = pd.to_numeric(df["Value"], errors="coerce")
+        df = df.dropna(subset=["Date", "Value"]).sort_values("Date").reset_index(drop=True)
+
+        if df.empty:
+            return pd.DataFrame(columns=["Date", "Value"]), None
+
+        return df, f"FRED {series_id}: käytetään välimuistia, koska verkkohaku epäonnistui."
+
+    except Exception as e:
+        return pd.DataFrame(columns=["Date", "Value"]), f"FRED {series_id}: välimuistin luku epäonnistui: {e!r}"
+
+
+def _write_fred_cache(series_id: str, df: pd.DataFrame) -> None:
+    if df is None or df.empty:
+        return
+
+    try:
+        FRED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+        out = df.copy()
+        out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+        out["Value"] = pd.to_numeric(out["Value"], errors="coerce")
+        out = out.dropna(subset=["Date", "Value"]).sort_values("Date")
+
+        if not out.empty:
+            out[["Date", "Value"]].to_csv(_fred_cache_path(series_id), index=False)
+
+    except Exception:
+        pass
+
+
 def _fetch_fred_series(series_id: str) -> tuple[pd.DataFrame, str | None]:
     try:
-        r = _safe_get(FRED_CSV_BASE, params={"id": series_id}, timeout=45)
+        r = _safe_get(FRED_CSV_BASE, params={"id": series_id}, timeout=60)
         text_preview = r.text[:300]
         df = pd.read_csv(StringIO(r.text))
 
         if df.empty:
+            cached_df, cache_msg = _read_fred_cache(series_id)
+            if not cached_df.empty:
+                return cached_df, cache_msg
             return pd.DataFrame(columns=["Date", "Value"]), f"FRED {series_id}: CSV tuli, mutta se oli tyhjä."
 
         date_col = _pick_col(df, ["DATE", "date", "observation_date"])
@@ -191,6 +242,10 @@ def _fetch_fred_series(series_id: str) -> tuple[pd.DataFrame, str | None]:
                 break
 
         if date_col is None or value_col is None:
+            cached_df, cache_msg = _read_fred_cache(series_id)
+            if not cached_df.empty:
+                return cached_df, cache_msg
+
             return (
                 pd.DataFrame(columns=["Date", "Value"]),
                 f"FRED {series_id}: sarakkeita ei tunnistettu. Sarakkeet={list(df.columns)} Vastauksen alku={text_preview!r}",
@@ -204,34 +259,27 @@ def _fetch_fred_series(series_id: str) -> tuple[pd.DataFrame, str | None]:
         ).dropna(subset=["Date", "Value"])
 
         if out.empty:
+            cached_df, cache_msg = _read_fred_cache(series_id)
+            if not cached_df.empty:
+                return cached_df, cache_msg
+
             return (
                 pd.DataFrame(columns=["Date", "Value"]),
                 f"FRED {series_id}: data tuli, mutta siivouksen jälkeen ei jäänyt rivejä. "
                 f"Sarakkeet={list(df.columns)} Ensimmäiset rivit={df.head(3).to_dict(orient='records')}",
             )
 
-        return out.sort_values("Date").reset_index(drop=True), None
+        out = out.sort_values("Date").reset_index(drop=True)
+        _write_fred_cache(series_id, out)
 
-    except requests.exceptions.HTTPError as e:
-        status = getattr(e.response, "status_code", "tuntematon")
-        body = ""
-        try:
-            body = e.response.text[:500]
-        except Exception:
-            pass
-        return pd.DataFrame(columns=["Date", "Value"]), f"FRED {series_id}: HTTP-virhe {status}. Vastauksen alku={body!r}"
-
-    except requests.exceptions.Timeout as e:
-        return pd.DataFrame(columns=["Date", "Value"]), f"FRED {series_id}: aikakatkaisu: {e!r}"
-
-    except requests.exceptions.ConnectionError as e:
-        return pd.DataFrame(columns=["Date", "Value"]), f"FRED {series_id}: verkkoyhteysvirhe: {e!r}"
-
-    except pd.errors.ParserError as e:
-        return pd.DataFrame(columns=["Date", "Value"]), f"FRED {series_id}: CSV-jäsennys epäonnistui: {e!r}"
+        return out, None
 
     except Exception as e:
-        return pd.DataFrame(columns=["Date", "Value"]), f"FRED {series_id}: odottamaton virhe: {e!r}"
+        cached_df, cache_msg = _read_fred_cache(series_id)
+        if not cached_df.empty:
+            return cached_df, cache_msg or f"FRED {series_id}: käytetään välimuistia virheen jälkeen."
+
+        return pd.DataFrame(columns=["Date", "Value"]), f"FRED {series_id}: verkkohaku epäonnistui eikä välimuistia ollut: {e!r}"
 
 
 def _fetch_ecb_dataset_csv(dataset: str, key: str, start_years: int = 10) -> tuple[pd.DataFrame, str | None]:
@@ -279,26 +327,8 @@ def _fetch_ecb_dataset_csv(dataset: str, key: str, start_years: int = 10) -> tup
 
         return out.sort_values("Date").reset_index(drop=True), None
 
-    except requests.exceptions.HTTPError as e:
-        status = getattr(e.response, "status_code", "tuntematon")
-        body = ""
-        try:
-            body = e.response.text[:500]
-        except Exception:
-            pass
-        return pd.DataFrame(columns=["Date", "Value"]), f"ECB {dataset}/{key}: HTTP-virhe {status}. Vastauksen alku={body!r}"
-
-    except requests.exceptions.Timeout as e:
-        return pd.DataFrame(columns=["Date", "Value"]), f"ECB {dataset}/{key}: aikakatkaisu: {e!r}"
-
-    except requests.exceptions.ConnectionError as e:
-        return pd.DataFrame(columns=["Date", "Value"]), f"ECB {dataset}/{key}: verkkoyhteysvirhe: {e!r}"
-
-    except pd.errors.ParserError as e:
-        return pd.DataFrame(columns=["Date", "Value"]), f"ECB {dataset}/{key}: CSV-jäsennys epäonnistui: {e!r}"
-
     except Exception as e:
-        return pd.DataFrame(columns=["Date", "Value"]), f"ECB {dataset}/{key}: odottamaton virhe: {e!r}"
+        return pd.DataFrame(columns=["Date", "Value"]), f"ECB {dataset}/{key}: haku epäonnistui: {e!r}"
 
 
 def _calc_yoy_from_index(df: pd.DataFrame, value_col: str = "Value") -> pd.DataFrame:
@@ -346,7 +376,7 @@ def fetch_ecb_fx_series(currency: str, years: int = 10) -> pd.DataFrame:
     }
 
     try:
-        txt = _safe_get(url, params=params).text
+        txt = _safe_get(url, params=params, timeout=45).text
     except requests.RequestException:
         return _empty_fx_df()
 
@@ -389,7 +419,8 @@ def fetch_money_supply_panel(currency: str, years: int = 10) -> tuple[pd.DataFra
         m2["BroadMoney_GDPPct"] = np.nan
         m2["Currency"] = currency
         m2["Year"] = m2["Date"].dt.year
-        return m2[["Date", "Year", "BroadMoney_LCU", "BroadMoney_GrowthPct", "BroadMoney_GDPPct", "Currency"]].copy(), None
+
+        return m2[["Date", "Year", "BroadMoney_LCU", "BroadMoney_GrowthPct", "BroadMoney_GDPPct", "Currency"]].copy(), msg
 
     if currency == "EUR":
         m3, msg = _fetch_ecb_dataset_csv(ECB_M3_DATASET, ECB_M3_KEY, start_years=years)
@@ -402,7 +433,8 @@ def fetch_money_supply_panel(currency: str, years: int = 10) -> tuple[pd.DataFra
         m3["BroadMoney_GDPPct"] = np.nan
         m3["Currency"] = currency
         m3["Year"] = m3["Date"].dt.year
-        return m3[["Date", "Year", "BroadMoney_LCU", "BroadMoney_GrowthPct", "BroadMoney_GDPPct", "Currency"]].copy(), None
+
+        return m3[["Date", "Year", "BroadMoney_LCU", "BroadMoney_GrowthPct", "BroadMoney_GDPPct", "Currency"]].copy(), msg
 
     return _empty_money_df(), f"{currency}: rahamäärädataa ei ole määritelty."
 
@@ -415,21 +447,14 @@ def fetch_macro_context_panel(currency: str, years: int = 10) -> tuple[pd.DataFr
         cpi, cpi_msg = _fetch_fred_series(FRED_SERIES["USD_CPI"])
         rate, rate_msg = _fetch_fred_series(FRED_SERIES["USD_POLICY"])
 
-        debug_parts = []
-        if cpi_msg:
-            debug_parts.append(cpi_msg)
-        if rate_msg:
-            debug_parts.append(rate_msg)
+        debug_parts = [x for x in [cpi_msg, rate_msg] if x]
 
         if cpi.empty and rate.empty:
             return _empty_macro_df(), " | ".join(debug_parts) if debug_parts else "USD CPI- ja korkosarjat jäivät tyhjiksi."
 
         if not cpi.empty:
             cpi = _calc_yoy_from_index(cpi, "Value").rename(
-                columns={
-                    "Value": "CPI_Index",
-                    "YoY_Pct": "InflationCPI_Pct",
-                }
+                columns={"Value": "CPI_Index", "YoY_Pct": "InflationCPI_Pct"}
             )
             cpi = _to_month_end(cpi)
 
@@ -454,21 +479,14 @@ def fetch_macro_context_panel(currency: str, years: int = 10) -> tuple[pd.DataFr
         hicp, hicp_msg = _fetch_fred_series(FRED_SERIES["EUR_HICP"])
         rate, rate_msg = _fetch_fred_series(FRED_SERIES["EUR_POLICY"])
 
-        debug_parts = []
-        if hicp_msg:
-            debug_parts.append(hicp_msg)
-        if rate_msg:
-            debug_parts.append(rate_msg)
+        debug_parts = [x for x in [hicp_msg, rate_msg] if x]
 
         if hicp.empty and rate.empty:
             return _empty_macro_df(), " | ".join(debug_parts) if debug_parts else "EUR HICP- ja korkosarjat jäivät tyhjiksi."
 
         if not hicp.empty:
             hicp = _calc_yoy_from_index(hicp, "Value").rename(
-                columns={
-                    "Value": "CPI_Index",
-                    "YoY_Pct": "InflationCPI_Pct",
-                }
+                columns={"Value": "CPI_Index", "YoY_Pct": "InflationCPI_Pct"}
             )
             hicp = _to_month_end(hicp)
 
