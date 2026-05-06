@@ -359,17 +359,25 @@ def _render_inventory_tab():
 def render():
     st.subheader("🛢 Öljy & polttoaineet")
     st.caption(
-    "Lähteet: Yahoo Finance (Brent), Tilastokeskus / Traficom (polttoaineet), "
-    "EIA (USA varastot, OECD varastot) ja Our World in Data (tuotanto)."
+        "Lähteet: Yahoo Finance (Brent), Tilastokeskus / Traficom (polttoaineet), "
+        "EIA (USA varastot, OECD varastot) ja Our World in Data (tuotanto)."
     )
 
-    t1, t2, t3 = st.tabs(["💵 Hinta", "🌍 Tuotanto", "📦 Varastot"])
+    view = st.radio(
+        "Valitse näkymä",
+        ["💵 Hinta", "🌍 Tuotanto", "📦 Varastot"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="oil_view",
+    )
 
-    with t1:
+    st.divider()
+
+    if view == "💵 Hinta":
         _render_price_tab()
 
-    with t2:
+    elif view == "🌍 Tuotanto":
         _render_production_tab()
 
-    with t3:
+    elif view == "📦 Varastot":
         _render_inventory_tab()
