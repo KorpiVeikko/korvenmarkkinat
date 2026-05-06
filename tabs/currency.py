@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 from services.currency_data import (
     CURRENCY_META,
     fetch_currency_bundle,
+    fetch_ecb_fx_series,
 )
 from services.currency_utils import (
     ANCHOR_CURRENCY,
@@ -19,21 +21,24 @@ from services.currency_view_helpers import (
     currency_format_func,
     get_macro_currency_options,
     macro_currency_format_func,
-    render_fx_tab,
     render_money_macro_tab,
     render_overview_tab,
 )
 
 
-@st.cache_data(show_spinner="Haetaan valuutan tarkemmat tiedot…")
+@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
+def load_fx_series(currency: str, years: int = 10) -> pd.DataFrame:
+    return fetch_ecb_fx_series(currency, years=years)
+
+
+@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
 def load_currency_bundle(currency: str, years: int = 10) -> dict:
     return fetch_currency_bundle(currency, years=years)
 
 
-@st.cache_data(show_spinner="Rakennetaan USD-ankkurinen valuuttayhteenveto…")
+@st.cache_data(ttl=60 * 60 * 24, show_spinner="Rakennetaan valuuttayhteenveto…")
 def load_currency_overview_anchor(years: int = 10) -> pd.DataFrame:
-    anchor_bundle = fetch_currency_bundle(ANCHOR_CURRENCY, years=years)
-    anchor_fx = anchor_bundle["fx"]
+    anchor_fx = load_fx_series(ANCHOR_CURRENCY, years=years)
 
     rows = []
 
@@ -41,9 +46,7 @@ def load_currency_overview_anchor(years: int = 10) -> pd.DataFrame:
         if code == ANCHOR_CURRENCY:
             continue
 
-        bundle = fetch_currency_bundle(code, years=years)
-        fx = bundle["fx"]
-
+        fx = load_fx_series(code, years=years)
         fx_anchor = to_anchor_fx(fx, anchor_fx)
         metrics = build_fx_metrics(fx_anchor)
 
@@ -65,6 +68,54 @@ def load_currency_overview_anchor(years: int = 10) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def render_fx_tab_fast(fx_currency: str, years: int) -> None:
+    fx_raw = load_fx_series(fx_currency, years=years)
+    anchor_fx = load_fx_series(ANCHOR_CURRENCY, years=years)
+
+    fx = to_anchor_fx(fx_raw, anchor_fx)
+    metrics = build_fx_metrics(fx)
+
+    st.markdown(f"#### {fx_currency} – kurssikehitys")
+
+    if fx is None or fx.empty:
+        st.warning("Kurssihistoriaa ei saatu.")
+        return
+
+    k1, k2, k3, k4 = st.columns(4, gap="large")
+
+    with k1:
+        st.metric(
+            f"{fx_currency} / {ANCHOR_CURRENCY}",
+            fmt_num(metrics.latest_rate, 4),
+            f"{fmt_pct(metrics.ytd_pct)} (YTD)" if metrics.ytd_pct is not None else None,
+        )
+        if metrics.latest_date is not None:
+            st.caption(f"Päivä: {metrics.latest_date.date()}")
+
+    with k2:
+        st.metric("Muutos 1 v", fmt_pct(metrics.change_1y_pct))
+        st.caption("Valuuttakurssi")
+
+    with k3:
+        st.metric("Muutos 5 v", fmt_pct(metrics.change_5y_pct))
+        st.caption("Valuuttakurssi")
+
+    with k4:
+        st.metric("Volatiliteetti 1 v", fmt_pct(metrics.volatility_1y_pct))
+        st.caption("Annualisoitu")
+
+    st.divider()
+
+    fig = px.line(
+        fx,
+        x="Date",
+        y="Rate",
+        title=f"{fx_currency} / {ANCHOR_CURRENCY} – viimeiset {years} vuotta",
+        labels={"Date": "Päivä", "Rate": f"{fx_currency} per {ANCHOR_CURRENCY}"},
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
 def render() -> None:
     st.subheader("💱 Valuuttakurssit")
     st.caption(
@@ -74,10 +125,7 @@ def render() -> None:
         f"{ANCHOR_CURRENCY} itse on jätetty pois FX-vertailusta, koska se olisi ankkurina aina 1.0."
     )
 
-    with st.sidebar:
-        #st.markdown("### 💱 Valuuttatabi")
-        years = 10
-        #years = st.slider("Historiapituus (vuotta)", 3, 15, 10, key="currency_years")
+    years = 10
 
     fx_codes = [c for c in CURRENCY_META.keys() if c != ANCHOR_CURRENCY]
     macro_codes = get_macro_currency_options()
@@ -88,20 +136,21 @@ def render() -> None:
     default_macro_currency = "USD" if "USD" in macro_codes else macro_codes[0]
     default_macro_idx = macro_codes.index(default_macro_currency)
 
-    overview = load_currency_overview_anchor(years=years)
+    view = st.radio(
+        "Valitse näkymä",
+        ["📋 Yleiskuva valuutoista", "📈 Kurssikehitys", "🏦 Rahamäärä & makro"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="currency_view",
+    )
 
-    
-    t1, t2, t3 = st.tabs([
-        "📋 Yleiskuva valuutoista",
-        "📈 Kurssikehitys",
-        "🏦 Rahamäärä & makro",
-        
-    ])
+    st.divider()
 
-    with t1:
+    if view == "📋 Yleiskuva valuutoista":
+        overview = load_currency_overview_anchor(years=years)
         render_overview_tab(overview)
 
-    with t2:
+    elif view == "📈 Kurssikehitys":
         st.markdown("### 📈 Kurssikehitys")
 
         fx_currency = st.selectbox(
@@ -112,13 +161,9 @@ def render() -> None:
             key="currency_selected_code_fx",
         )
 
-        render_fx_tab(
-            fx_currency=fx_currency,
-            years=years,
-            load_currency_bundle=load_currency_bundle,
-        )
+        render_fx_tab_fast(fx_currency=fx_currency, years=years)
 
-    with t3:
+    elif view == "🏦 Rahamäärä & makro":
         st.markdown("### 🏦 Rahamäärä & makro")
 
         money_currency = st.selectbox(
@@ -134,6 +179,3 @@ def render() -> None:
             years=years,
             load_currency_bundle=load_currency_bundle,
         )
-        
-
-    
