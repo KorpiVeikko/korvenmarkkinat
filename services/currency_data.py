@@ -13,11 +13,16 @@ import requests
 import os
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from dotenv import load_dotenv
 
+load_dotenv()
 
 ECB_API_BASE = "https://data-api.ecb.europa.eu/service/data/EXR"
 ECB_DATA_API_BASE = "https://data-api.ecb.europa.eu/service/data"
 FRED_CSV_BASE = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+
+FRED_API_BASE = "https://api.stlouisfed.org/fred/series/observations"
+FRED_API_KEY = os.getenv("FRED_API_KEY", "")
 
 DATA_CACHE_DIR = Path("data_cache")
 FRED_CACHE_DIR = DATA_CACHE_DIR / "fred"
@@ -324,63 +329,83 @@ def _write_fred_cache(series_id: str, df: pd.DataFrame) -> None:
 
 
 def _fetch_fred_series(series_id: str) -> tuple[pd.DataFrame, str | None]:
+    if not FRED_API_KEY:
+        cached_df, cache_msg = _read_fred_cache(series_id)
+
+        if not cached_df.empty:
+            return cached_df, "FRED API key puuttuu, käytetään välimuistia."
+
+        return (
+            pd.DataFrame(columns=["Date", "Value"]),
+            "FRED_API_KEY puuttuu Streamlit Cloud Secrets -asetuksista.",
+        )
+
     try:
-        r = _safe_get(FRED_CSV_BASE, params={"id": series_id}, timeout=8)
-        text_preview = r.text[:300]
-        df = pd.read_csv(StringIO(r.text))
+        r = _safe_get(
+            FRED_API_BASE,
+            params={
+                "series_id": series_id,
+                "api_key": FRED_API_KEY,
+                "file_type": "json",
+            },
+            timeout=8,
+        )
 
-        if df.empty:
+        data = r.json()
+
+        observations = data.get("observations", [])
+
+        if not observations:
             cached_df, cache_msg = _read_fred_cache(series_id)
-            if not cached_df.empty:
-                return cached_df, cache_msg
-            return pd.DataFrame(columns=["Date", "Value"]), f"FRED {series_id}: CSV tuli, mutta se oli tyhjä."
 
-        date_col = _pick_col(df, ["DATE", "date", "observation_date"])
-        value_col = None
-        for c in df.columns:
-            if str(c).strip().lower() not in {"date", "observation_date"}:
-                value_col = c
-                break
-
-        if date_col is None or value_col is None:
-            cached_df, cache_msg = _read_fred_cache(series_id)
             if not cached_df.empty:
                 return cached_df, cache_msg
 
             return (
                 pd.DataFrame(columns=["Date", "Value"]),
-                f"FRED {series_id}: sarakkeita ei tunnistettu. Sarakkeet={list(df.columns)} Vastauksen alku={text_preview!r}",
+                f"FRED {series_id}: observations-lista oli tyhjä.",
             )
 
         out = pd.DataFrame(
             {
-                "Date": pd.to_datetime(df[date_col], errors="coerce"),
-                "Value": pd.to_numeric(df[value_col], errors="coerce"),
+                "Date": pd.to_datetime(
+                    [x.get("date") for x in observations],
+                    errors="coerce",
+                ),
+                "Value": pd.to_numeric(
+                    [x.get("value") for x in observations],
+                    errors="coerce",
+                ),
             }
-        ).dropna(subset=["Date", "Value"])
+        )
+
+        out = out.dropna(subset=["Date", "Value"]).sort_values("Date").reset_index(drop=True)
 
         if out.empty:
             cached_df, cache_msg = _read_fred_cache(series_id)
+
             if not cached_df.empty:
                 return cached_df, cache_msg
 
             return (
                 pd.DataFrame(columns=["Date", "Value"]),
-                f"FRED {series_id}: data tuli, mutta siivouksen jälkeen ei jäänyt rivejä. "
-                f"Sarakkeet={list(df.columns)} Ensimmäiset rivit={df.head(3).to_dict(orient='records')}",
+                f"FRED {series_id}: JSON-data jäi tyhjäksi siivouksen jälkeen.",
             )
 
-        out = out.sort_values("Date").reset_index(drop=True)
         _write_fred_cache(series_id, out)
 
         return out, None
 
     except Exception as e:
         cached_df, cache_msg = _read_fred_cache(series_id)
+
         if not cached_df.empty:
             return cached_df, cache_msg or f"FRED {series_id}: käytetään välimuistia virheen jälkeen."
 
-        return pd.DataFrame(columns=["Date", "Value"]), f"FRED {series_id}: verkkohaku epäonnistui eikä välimuistia ollut: {e!r}"
+        return (
+            pd.DataFrame(columns=["Date", "Value"]),
+            f"FRED {series_id}: API-haku epäonnistui eikä välimuistia ollut: {e!r}",
+        )
 
 
 def _fetch_ecb_dataset_csv(dataset: str, key: str, start_years: int = 10) -> tuple[pd.DataFrame, str | None]:
