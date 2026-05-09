@@ -113,6 +113,87 @@ def _empty_macro_df() -> pd.DataFrame:
         columns=["Date", "Year", "CPI_Index", "InflationCPI_Pct", "PolicyRate_Pct", "RealInterestRate_Pct", "Currency"]
     )
 
+def _ensure_macro_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    required = [
+        "Date",
+        "Year",
+        "CPI_Index",
+        "InflationCPI_Pct",
+        "PolicyRate_Pct",
+        "RealInterestRate_Pct",
+        "Currency",
+    ]
+
+    for col in required:
+        if col not in out.columns:
+            out[col] = np.nan
+
+    return out
+
+
+def _build_macro_panel(
+    currency: str,
+    cpi: pd.DataFrame,
+    rate: pd.DataFrame,
+    cpi_label: str,
+    debug_parts: list[str],
+) -> tuple[pd.DataFrame, str | None]:
+    if cpi.empty and rate.empty:
+        msg = " | ".join(debug_parts) if debug_parts else f"{currency}: inflaatio- ja korkosarjat jäivät tyhjiksi."
+        return _empty_macro_df(), msg
+
+    if not cpi.empty:
+        cpi = _calc_yoy_from_index(cpi, "Value").rename(
+            columns={"Value": "CPI_Index", "YoY_Pct": "InflationCPI_Pct"}
+        )
+        cpi = _to_month_end(cpi)
+    else:
+        cpi = pd.DataFrame(columns=["Date", "CPI_Index", "InflationCPI_Pct"])
+
+    if not rate.empty:
+        rate = rate.rename(columns={"Value": "PolicyRate_Pct"})
+        rate = _to_month_end(rate)
+    else:
+        rate = pd.DataFrame(columns=["Date", "PolicyRate_Pct"])
+
+    merged = pd.merge(cpi, rate, on="Date", how="outer").sort_values("Date").reset_index(drop=True)
+
+    if merged.empty:
+        return _empty_macro_df(), f"{currency}: {cpi_label} ja korko haettiin, mutta yhdistämisen jälkeen ei jäänyt rivejä."
+
+    merged = _ensure_macro_columns(merged)
+
+    merged["Date"] = pd.to_datetime(merged["Date"], errors="coerce")
+    merged["CPI_Index"] = pd.to_numeric(merged["CPI_Index"], errors="coerce")
+    merged["InflationCPI_Pct"] = pd.to_numeric(merged["InflationCPI_Pct"], errors="coerce")
+    merged["PolicyRate_Pct"] = pd.to_numeric(merged["PolicyRate_Pct"], errors="coerce")
+
+    merged["RealInterestRate_Pct"] = merged["PolicyRate_Pct"] - merged["InflationCPI_Pct"]
+    merged["Currency"] = currency
+    merged["Year"] = merged["Date"].dt.year
+
+    merged = merged.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
+
+    if merged.empty:
+        return _empty_macro_df(), f"{currency}: makrodata jäi tyhjäksi päivämääräsiivouksen jälkeen."
+
+    return (
+        merged[
+            [
+                "Date",
+                "Year",
+                "CPI_Index",
+                "InflationCPI_Pct",
+                "PolicyRate_Pct",
+                "RealInterestRate_Pct",
+                "Currency",
+            ]
+        ].copy(),
+        " | ".join(debug_parts) if debug_parts else None,
+    )
+
 
 def _empty_metrics(currency: str) -> FxMetrics:
     return FxMetrics(
@@ -449,30 +530,12 @@ def fetch_macro_context_panel(currency: str, years: int = 10) -> tuple[pd.DataFr
 
         debug_parts = [x for x in [cpi_msg, rate_msg] if x]
 
-        if cpi.empty and rate.empty:
-            return _empty_macro_df(), " | ".join(debug_parts) if debug_parts else "USD CPI- ja korkosarjat jäivät tyhjiksi."
-
-        if not cpi.empty:
-            cpi = _calc_yoy_from_index(cpi, "Value").rename(
-                columns={"Value": "CPI_Index", "YoY_Pct": "InflationCPI_Pct"}
-            )
-            cpi = _to_month_end(cpi)
-
-        if not rate.empty:
-            rate = rate.rename(columns={"Value": "PolicyRate_Pct"})
-            rate = _to_month_end(rate)
-
-        merged = pd.merge(cpi, rate, on="Date", how="outer").sort_values("Date").reset_index(drop=True)
-        if merged.empty:
-            return _empty_macro_df(), "USD: CPI ja korko haettiin, mutta yhdistämisen jälkeen ei jäänyt rivejä."
-
-        merged["RealInterestRate_Pct"] = merged["PolicyRate_Pct"] - merged["InflationCPI_Pct"]
-        merged["Currency"] = currency
-        merged["Year"] = merged["Date"].dt.year
-
-        return (
-            merged[["Date", "Year", "CPI_Index", "InflationCPI_Pct", "PolicyRate_Pct", "RealInterestRate_Pct", "Currency"]].copy(),
-            " | ".join(debug_parts) if debug_parts else None,
+        return _build_macro_panel(
+            currency=currency,
+            cpi=cpi,
+            rate=rate,
+            cpi_label="CPI",
+            debug_parts=debug_parts,
         )
 
     if currency == "EUR":
@@ -481,30 +544,12 @@ def fetch_macro_context_panel(currency: str, years: int = 10) -> tuple[pd.DataFr
 
         debug_parts = [x for x in [hicp_msg, rate_msg] if x]
 
-        if hicp.empty and rate.empty:
-            return _empty_macro_df(), " | ".join(debug_parts) if debug_parts else "EUR HICP- ja korkosarjat jäivät tyhjiksi."
-
-        if not hicp.empty:
-            hicp = _calc_yoy_from_index(hicp, "Value").rename(
-                columns={"Value": "CPI_Index", "YoY_Pct": "InflationCPI_Pct"}
-            )
-            hicp = _to_month_end(hicp)
-
-        if not rate.empty:
-            rate = rate.rename(columns={"Value": "PolicyRate_Pct"})
-            rate = _to_month_end(rate)
-
-        merged = pd.merge(hicp, rate, on="Date", how="outer").sort_values("Date").reset_index(drop=True)
-        if merged.empty:
-            return _empty_macro_df(), "EUR: HICP ja korko haettiin, mutta yhdistämisen jälkeen ei jäänyt rivejä."
-
-        merged["RealInterestRate_Pct"] = merged["PolicyRate_Pct"] - merged["InflationCPI_Pct"]
-        merged["Currency"] = currency
-        merged["Year"] = merged["Date"].dt.year
-
-        return (
-            merged[["Date", "Year", "CPI_Index", "InflationCPI_Pct", "PolicyRate_Pct", "RealInterestRate_Pct", "Currency"]].copy(),
-            " | ".join(debug_parts) if debug_parts else None,
+        return _build_macro_panel(
+            currency=currency,
+            cpi=hicp,
+            rate=rate,
+            cpi_label="HICP",
+            debug_parts=debug_parts,
         )
 
     return _empty_macro_df(), f"{currency}: makrodataa ei ole määritelty."
