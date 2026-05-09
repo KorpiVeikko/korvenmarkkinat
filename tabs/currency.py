@@ -90,6 +90,7 @@ def load_currency_overview_anchor(years: int = 10) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+
 def render_fx_tab_fast(fx_currency: str, years: int) -> None:
     fx_raw = load_fx_series(fx_currency, years=years)
     anchor_fx = load_fx_series(ANCHOR_CURRENCY, years=years)
