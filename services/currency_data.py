@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import requests
+import os
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -20,6 +21,10 @@ FRED_CSV_BASE = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 
 DATA_CACHE_DIR = Path("data_cache")
 FRED_CACHE_DIR = DATA_CACHE_DIR / "fred"
+
+HTTP_CONNECT_TIMEOUT = int(os.getenv("HTTP_CONNECT_TIMEOUT", "5"))
+HTTP_READ_TIMEOUT = int(os.getenv("HTTP_READ_TIMEOUT", "15"))
+HTTP_RETRY_TOTAL = int(os.getenv("HTTP_RETRY_TOTAL", "1"))
 
 CURRENCY_META: dict[str, dict[str, str | None]] = {
     "EUR": {"name": "Euro", "country": None},
@@ -77,15 +82,16 @@ def _build_session() -> requests.Session:
     session = requests.Session()
 
     retry = Retry(
-        total=2,
-        connect=2,
-        read=2,
-        backoff_factor=1.0,
+        total=HTTP_RETRY_TOTAL,
+        connect=HTTP_RETRY_TOTAL,
+        read=HTTP_RETRY_TOTAL,
+        backoff_factor=0.5,
         status_forcelist=(429, 500, 502, 503, 504),
         allowed_methods=frozenset(["GET"]),
+        raise_on_status=False,
     )
 
-    adapter = HTTPAdapter(max_retries=retry)
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=4, pool_maxsize=4)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
 
@@ -211,9 +217,16 @@ def _empty_metrics(currency: str) -> FxMetrics:
     )
 
 
-def _safe_get(url: str, params: dict | None = None, timeout: int = 30) -> requests.Response:
+def _safe_get(url: str, params: dict | None = None, timeout: int | None = None) -> requests.Response:
     session = _build_session()
-    r = session.get(url, params=params, timeout=(8, timeout))
+
+    read_timeout = HTTP_READ_TIMEOUT if timeout is None else min(int(timeout), HTTP_READ_TIMEOUT)
+
+    r = session.get(
+        url,
+        params=params,
+        timeout=(HTTP_CONNECT_TIMEOUT, read_timeout),
+    )
     r.raise_for_status()
     return r
 
@@ -305,7 +318,7 @@ def _write_fred_cache(series_id: str, df: pd.DataFrame) -> None:
 
 def _fetch_fred_series(series_id: str) -> tuple[pd.DataFrame, str | None]:
     try:
-        r = _safe_get(FRED_CSV_BASE, params={"id": series_id}, timeout=60)
+        r = _safe_get(FRED_CSV_BASE, params={"id": series_id}, timeout=15)
         text_preview = r.text[:300]
         df = pd.read_csv(StringIO(r.text))
 
@@ -374,7 +387,7 @@ def _fetch_ecb_dataset_csv(dataset: str, key: str, start_years: int = 10) -> tup
                 "startPeriod": start.isoformat(),
                 "format": "csvdata",
             },
-            timeout=60,
+            timeout=15,
         )
         text_preview = r.text[:300]
         df = pd.read_csv(StringIO(r.text))
@@ -457,7 +470,7 @@ def fetch_ecb_fx_series(currency: str, years: int = 10) -> pd.DataFrame:
     }
 
     try:
-        txt = _safe_get(url, params=params, timeout=45).text
+        txt = _safe_get(url, params=params, timeout=12).text
     except requests.RequestException:
         return _empty_fx_df()
 

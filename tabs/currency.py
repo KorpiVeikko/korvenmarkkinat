@@ -25,6 +25,14 @@ from services.currency_view_helpers import (
     render_overview_tab,
 )
 
+from services.currency_data import (
+    CURRENCY_META,
+    fetch_currency_bundle,
+    fetch_ecb_fx_series,
+    fetch_money_supply_panel,
+    fetch_macro_context_panel,
+)
+
 
 @st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
 def load_fx_series(currency: str, years: int = 10) -> pd.DataFrame:
@@ -34,6 +42,20 @@ def load_fx_series(currency: str, years: int = 10) -> pd.DataFrame:
 @st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
 def load_currency_bundle(currency: str, years: int = 10) -> dict:
     return fetch_currency_bundle(currency, years=years)
+
+@st.cache_data(ttl=60 * 60 * 24 * 7, show_spinner="Ladataan rahamäärä- ja makrodataa…")
+def load_money_macro_bundle(currency: str, years: int = 10) -> dict:
+    money, money_debug = fetch_money_supply_panel(currency, years=years)
+    macro, macro_debug = fetch_macro_context_panel(currency, years=years)
+
+    return {
+        "money": money,
+        "macro": macro,
+        "debug": {
+            "money": money_debug,
+            "macro": macro_debug,
+        },
+    }
 
 
 @st.cache_data(ttl=60 * 60 * 24, show_spinner="Rakennetaan valuuttayhteenveto…")
@@ -177,5 +199,5 @@ def render() -> None:
         render_money_macro_tab(
             money_currency=money_currency,
             years=years,
-            load_currency_bundle=load_currency_bundle,
+            load_currency_bundle=load_money_macro_bundle,
         )
