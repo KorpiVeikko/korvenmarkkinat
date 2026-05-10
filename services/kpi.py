@@ -7,7 +7,7 @@ import itertools
 import pandas as pd
 import requests
 
-from services.compare import build_market_compare
+from services.market_data import fetch_price_history
 from services.macro_uljas import fetch_exports_products, fetch_imports_products
 
 from requests.adapters import HTTPAdapter
@@ -427,6 +427,116 @@ def fetch_public_debt_now() -> tuple[Optional[float], Optional[float], str]:
 
     return latest_val_mio * 1_000_000, pct, f"Kvartaali {latest_date.date()}"
 
+def _parse_eurostat_time_series(j: dict) -> pd.DataFrame:
+    if not isinstance(j, dict) or "value" not in j or "dimension" not in j:
+        return pd.DataFrame()
+
+    dim = j["dimension"]
+    time_cat = dim.get("time", {}).get("category", {})
+    time_index = time_cat.get("index", {})
+    time_label = time_cat.get("label", {})
+
+    if isinstance(time_index, dict) and time_index:
+        time_keys = [k for k, _ in sorted(time_index.items(), key=lambda kv: kv[1])]
+    else:
+        time_keys = list(time_label.keys())
+
+    values = j.get("value", {})
+    rows = []
+
+    for i, tk in enumerate(time_keys):
+        v = values.get(str(i))
+        if v is None:
+            v = values.get(i)
+
+        rows.append(
+            {
+                "Period": tk,
+                "Arvo": pd.to_numeric(v, errors="coerce"),
+            }
+        )
+
+    df = pd.DataFrame(rows).dropna(subset=["Arvo"])
+    if df.empty:
+        return pd.DataFrame()
+
+    if df["Period"].astype(str).str.contains("Q").any():
+        df["Date"] = pd.PeriodIndex(df["Period"], freq="Q").to_timestamp(how="start")
+    else:
+        df["Date"] = pd.to_datetime(df["Period"], errors="coerce")
+
+    df = df.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
+    return df
+
+
+def fetch_gdp_now() -> tuple[Optional[float], Optional[float], str]:
+    url = f"{EUROSTAT_API}/namq_10_gdp"
+    params = {
+        "lang": "EN",
+        "format": "JSON",
+        "freq": "Q",
+        "unit": "CP_MEUR",
+        "s_adj": "SCA",
+        "na_item": "B1GQ",
+        "geo": "FI",
+    }
+
+    session = _build_session()
+    r = session.get(url, params=params, timeout=(10, 45))
+    r.raise_for_status()
+
+    df = _parse_eurostat_time_series(r.json())
+    if df.empty:
+        return None, None, ""
+
+    latest_val_mio = float(df["Arvo"].iloc[-1])
+    latest_date = pd.to_datetime(df["Date"].iloc[-1])
+
+    prev = df[df["Date"] == latest_date - pd.DateOffset(years=1)]
+    pct = None
+
+    if not prev.empty:
+        prev_val = float(prev["Arvo"].iloc[-1])
+        if prev_val != 0:
+            pct = _pct_change(latest_val_mio, prev_val)
+
+    return latest_val_mio * 1_000_000, pct, f"Kvartaali {latest_date.date()}"
+
+
+def fetch_crude_oil_now() -> tuple[Optional[float], Optional[float], str]:
+    df = fetch_price_history("CL=F", period="1y")
+
+    if df is None or df.empty or "Close" not in df.columns:
+        return None, None, ""
+
+    d = df.copy()
+
+    if "Date" in d.columns:
+        d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
+    else:
+        d = d.reset_index()
+        d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
+
+    d["Close"] = pd.to_numeric(d["Close"], errors="coerce")
+    d = d.dropna(subset=["Date", "Close"]).sort_values("Date").reset_index(drop=True)
+
+    if d.empty:
+        return None, None, ""
+
+    latest_val = float(d["Close"].iloc[-1])
+    latest_date = pd.to_datetime(d["Date"].iloc[-1])
+
+    target = latest_date - pd.DateOffset(months=1)
+    prev_rows = d[d["Date"] <= target]
+
+    pct = None
+    if not prev_rows.empty:
+        prev_val = float(prev_rows["Close"].iloc[-1])
+        if prev_val != 0:
+            pct = _pct_change(latest_val, prev_val)
+
+    return latest_val, pct, f"Päivä {latest_date.date()}"
+
 
 def fetch_trade_balance_now(months: int = 24) -> tuple[Optional[float], Optional[float], str]:
     exp_df, _ = fetch_exports_products(months=months, lang="fi")
@@ -523,14 +633,30 @@ def build_kpi_items() -> List[Dict[str, Any]]:
             items.append(_build_item(name, "–", "Data puuttuu", ""))
 
     try:
-        snaps = build_market_compare(period="5y")
-        items.append(_build_market_item_from_snap("Kulta", snaps.get("Kulta", {}), 0))
-        items.append(_build_market_item_from_snap("Hopea", snaps.get("Hopea", {}), 2))
-        items.append(_build_market_item_from_snap("Bitcoin", snaps.get("Bitcoin", {}), 0))
+        latest_val, delta, sub = fetch_gdp_now()
+        items.append(
+            _build_item(
+                "BKT",
+                _fmt_money(latest_val),
+                f"{delta:+.1f}% (1 v)" if delta is not None else "",
+                sub,
+            )
+        )
     except Exception:
-        items.append(_build_item("Kulta", "–", "Data puuttuu", ""))
-        items.append(_build_item("Hopea", "–", "Data puuttuu", ""))
-        items.append(_build_item("Bitcoin", "–", "Data puuttuu", ""))
+        items.append(_build_item("BKT", "–", "Data puuttuu", ""))
+
+    try:
+        latest_val, delta, sub = fetch_crude_oil_now()
+        items.append(
+            _build_item(
+                "Raakaöljy",
+                f"{_fmt(latest_val, 2)} $/bbl",
+                f"{delta:+.1f}% (1 kk)" if delta is not None else "",
+                sub,
+            )
+        )
+    except Exception:
+        items.append(_build_item("Raakaöljy", "–", "Data puuttuu", ""))
 
     return items
 
