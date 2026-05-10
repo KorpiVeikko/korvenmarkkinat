@@ -732,3 +732,110 @@ def render_forest_stocks_section(bundle: dict) -> None:
 
         table = pd.DataFrame(rows)
         st.dataframe(table, use_container_width=True, hide_index=True)
+
+
+def render_forest_analysis_section(bundle: dict) -> None:
+    st.subheader("🧠 Metsäsektorin analyysi")
+    st.caption(
+        "Yhdistää puumarkkinan, metsäteollisuuden kysynnän, viennin ja metsäyhtiöiden markkinatunnelman yhdeksi tilannekuvaksi."
+    )
+
+    if not bundle:
+        st.info("Analyysia ei voitu muodostaa.")
+        return
+
+    cycle_icon = bundle.get("cycle_icon", "⚪")
+    cycle_label = bundle.get("cycle_label", "Ei dataa")
+    summary = bundle.get("summary", "")
+
+    with st.container(border=True):
+        st.markdown(f"## {cycle_icon} {cycle_label}")
+        st.write(summary)
+
+    st.divider()
+
+    st.markdown("### 📌 Tilaindikaattorit")
+
+    indicators = bundle.get("indicators", [])
+    if indicators:
+        for i in range(0, len(indicators), 3):
+            cols = st.columns(3)
+
+            for col, item in zip(cols, indicators[i : i + 3]):
+                with col:
+                    with st.container(border=True):
+                        st.markdown(f"### {item['Ikoni']} {item['Osa-alue']}")
+                        st.markdown(f"**Tila:** {item['Tila']}")
+                        st.markdown(_stock_pct_html(item.get("Muutos")), unsafe_allow_html=True)
+                        st.caption(item.get("Selite", ""))
+
+    st.divider()
+
+    st.markdown("### 🚢 Metsäteollisuuden vienti ja tuonti")
+
+    trade = bundle.get("trade", {})
+    trade_df = trade.get("trade_df", pd.DataFrame())
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        metric_card(
+            "Metsäteollisuuden vienti, 12 kk",
+            _fmt_analysis_money(trade.get("latest_export_12kk")),
+            f"{trade.get('export_yoy'):+.1f} % (1 v)" if trade.get("export_yoy") is not None else None,
+            "Tulli / Uljas",
+        )
+
+    with c2:
+        metric_card(
+            "Metsäteollisuuden nettovienti, 12 kk",
+            _fmt_analysis_money(trade.get("latest_net_12kk")),
+            f"{trade.get('net_yoy'):+.1f} % (1 v)" if trade.get("net_yoy") is not None else None,
+            "Vienti − tuonti",
+        )
+
+    if trade_df is not None and not trade_df.empty:
+        plot_df = trade_df.copy()
+        plot_df["Vienti_12kk_milj"] = plot_df["Vienti_12kk"] / 1_000_000
+        plot_df["Tuonti_12kk_milj"] = plot_df["Tuonti_12kk"] / 1_000_000
+        plot_df["Nettovienti_12kk_milj"] = plot_df["Nettovienti_12kk"] / 1_000_000
+
+        trade_plot = plot_df.melt(
+            id_vars=["Aika_dt"],
+            value_vars=["Vienti_12kk_milj", "Tuonti_12kk_milj", "Nettovienti_12kk_milj"],
+            var_name="Sarja",
+            value_name="Arvo",
+        ).dropna()
+
+        name_map = {
+            "Vienti_12kk_milj": "Vienti 12 kk",
+            "Tuonti_12kk_milj": "Tuonti 12 kk",
+            "Nettovienti_12kk_milj": "Nettovienti 12 kk",
+        }
+        trade_plot["Sarja"] = trade_plot["Sarja"].map(name_map)
+
+        fig = px.line(
+            trade_plot,
+            x="Aika_dt",
+            y="Arvo",
+            color="Sarja",
+            title="Metsäteollisuuden ulkomaankauppa, 12 kk liukuva summa",
+            labels={"Aika_dt": "Aika", "Arvo": "milj. €", "Sarja": ""},
+        )
+        fig.update_layout(hovermode="x unified")
+        st.plotly_chart(fig, width="stretch")
+
+    st.divider()
+
+    st.markdown("### 🧭 Miten tätä kannattaa tulkita?")
+    st.info(
+        "Tämä analyysi ei ole sijoitussuositus. Se kokoaa eri lähteistä metsäsektorin suhdannekuvaa: "
+        "puun hinnat kertovat raaka-aineen markkinasta, puukauppa ja puunkäyttö teollisuuden aktiivisuudesta, "
+        "vienti ulkoisesta kysynnästä ja metsäyhtiöiden osakkeet markkinoiden odotuksista."
+    )
+
+
+def _fmt_analysis_money(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    return f"{value / 1_000_000:,.0f} milj. €".replace(",", " ")

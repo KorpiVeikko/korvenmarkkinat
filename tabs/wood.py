@@ -19,8 +19,11 @@ from services.forest_view_helpers import (
     render_harvests_section,
     render_wood_use_section,
     render_forest_stocks_section,
+    render_forest_analysis_section,
 )
 from services.forest_stocks import build_forest_stocks_bundle
+
+from services.forest_analysis import build_forest_analysis_bundle
 
 @st.cache_data(show_spinner="Haetaan metsätalouden aineistoja…")
 def load_forest_bundle() -> dict[str, pd.DataFrame]:
@@ -52,6 +55,15 @@ def load_forest_stocks_bundle(period: str = "5y") -> dict:
     return build_forest_stocks_bundle(period=period)
 
 
+@st.cache_data(ttl=60 * 60 * 6, show_spinner="Rakennetaan metsäsektorin analyysiä…")
+def load_forest_analysis_bundle(forest_bundle: dict, stocks_bundle: dict) -> dict:
+    return build_forest_analysis_bundle(
+        forest_bundle=forest_bundle,
+        stocks_bundle=stocks_bundle,
+        months=84,
+    )
+
+
 def render() -> None:
     st.subheader("🌲 Metsätalous")
     st.caption("Lähteet: Luke / PXWeb, Yahoo Finance – puun hinnat, puukauppa, hakkuut, puun käyttö ja metsäyhtiöt")
@@ -62,13 +74,14 @@ def render() -> None:
         st.error(f"Metsätalousdatan haku epäonnistui: {e}")
         return
 
-    prices_tab, industrial_tab, harvests_tab, use_tab, stocks_tab = st.tabs(
+    prices_tab, industrial_tab, harvests_tab, use_tab, stocks_tab, analysis_tab = st.tabs(
         [
             "🪵 Puun hinnat",
             "🏭 Teollinen puukauppa",
             "🪓 Hakkuut",
             "🏗️ Puun käyttö",
             "📈 Metsäyhtiöt",
+            "🧠 Metsäsektorin analyysi",
         ]
     )
 
@@ -87,3 +100,8 @@ def render() -> None:
     with stocks_tab:
         stocks_bundle = load_forest_stocks_bundle(period="5y")
         render_forest_stocks_section(stocks_bundle)
+
+    with analysis_tab:
+        stocks_bundle = load_forest_stocks_bundle(period="5y")
+        analysis_bundle = load_forest_analysis_bundle(bundle, stocks_bundle)
+        render_forest_analysis_section(analysis_bundle)
