@@ -635,3 +635,100 @@ def render_wood_use_section(df: pd.DataFrame) -> None:
         labels={"Date": "Vuosi", "Arvo_plot": "milj. m³"},
     )
     st.plotly_chart(fig_total, width="stretch")
+
+def _stock_pct_color(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "#6b7280"
+    return "#15803d" if value >= 0 else "#b91c1c"
+
+
+def _stock_pct_html(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        txt = "—"
+    else:
+        sign = "+" if value >= 0 else ""
+        txt = f"{sign}{value:.1f} %"
+
+    return f"""
+    <span style="
+        color:{_stock_pct_color(value)};
+        font-weight:700;
+        font-size:1.15rem;
+    ">
+        {txt}
+    </span>
+    """
+
+
+def render_forest_stocks_section(bundle: dict) -> None:
+    st.subheader("📈 Metsäyhtiöt")
+    st.caption(
+        "Suomalaisten metsä- ja metsäteollisuuteen liittyvien pörssiyhtiöiden kurssikehitys. "
+        "Muutosluvut ovat prosentteja: vihreä = nousu, punainen = lasku."
+    )
+
+    snapshots = bundle.get("snapshots", [])
+    normalized = bundle.get("normalized", pd.DataFrame())
+
+    if not snapshots:
+        st.info("Metsäyhtiöiden osakedataa ei saatu.")
+        return
+
+    for i in range(0, len(snapshots), 3):
+        cols = st.columns(3)
+
+        for col, snap in zip(cols, snapshots[i : i + 3]):
+            with col:
+                with st.container(border=True):
+                    st.markdown(f"### {snap['Yhtiö']}")
+                    st.caption(f"{snap['Symboli']} • {snap['Kuvaus']}")
+
+                    value = snap.get("Nyt")
+                    value_txt = "—" if value is None or pd.isna(value) else f"{value:,.2f} €".replace(",", " ")
+
+                    st.markdown(f"**Kurssi nyt:** {value_txt}")
+
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.caption("1 kk")
+                        st.markdown(_stock_pct_html(snap.get("1 kk %")), unsafe_allow_html=True)
+
+                    with c2:
+                        st.caption("1 v")
+                        st.markdown(_stock_pct_html(snap.get("1 v %")), unsafe_allow_html=True)
+
+    st.divider()
+
+    st.markdown("### 💶 Miten 100 € olisi kehittynyt?")
+    st.caption("Kaikki yhtiöt alkavat arvosta 100, jotta kehitystä on helpompi vertailla.")
+
+    if normalized is None or normalized.empty:
+        st.info("Vertailukuvaajaa ei voitu muodostaa.")
+        return
+
+    fig = px.line(
+        normalized,
+        x="Date",
+        y="Arvo",
+        color="Yhtiö",
+        title="Metsäyhtiöiden suhteellinen kurssikehitys",
+        labels={"Date": "Aika", "Arvo": "Arvo, kun alkuhetki = 100", "Yhtiö": ""},
+    )
+    fig.update_layout(hovermode="x unified")
+    st.plotly_chart(fig, width="stretch")
+
+    with st.expander("Näytä tekninen taulukko"):
+        rows = []
+        for snap in snapshots:
+            rows.append(
+                {
+                    "Yhtiö": snap["Yhtiö"],
+                    "Symboli": snap["Symboli"],
+                    "Kurssi": snap["Nyt"],
+                    "1 kk %": snap["1 kk %"],
+                    "1 v %": snap["1 v %"],
+                }
+            )
+
+        table = pd.DataFrame(rows)
+        st.dataframe(table, use_container_width=True, hide_index=True)
