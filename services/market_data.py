@@ -115,7 +115,7 @@ def _normalize_yfinance_df(df: pd.DataFrame) -> pd.DataFrame:
 def _fetch_from_fred_brent_debug(period: str) -> tuple[pd.DataFrame, str | None]:
     try:
         session = _build_session()
-        res = session.get(FRED_BRENT_CSV_URL, timeout=45)
+        res = session.get(FRED_BRENT_CSV_URL, timeout=10)
 
         status_code = res.status_code
         content_type = res.headers.get("Content-Type", "")
