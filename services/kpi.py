@@ -504,7 +504,7 @@ def fetch_gdp_now() -> tuple[Optional[float], Optional[float], str]:
 
 
 def fetch_crude_oil_now() -> tuple[Optional[float], Optional[float], str]:
-    df = fetch_price_history("CL=F", period="1y")
+    df = fetch_price_history("BZ=F", period="1y")
 
     if df is None or df.empty or "Close" not in df.columns:
         return None, None, ""
@@ -649,8 +649,8 @@ def build_kpi_items() -> List[Dict[str, Any]]:
         latest_val, delta, sub = fetch_crude_oil_now()
         items.append(
             _build_item(
-                "Raakaöljy",
-                f"{_fmt(latest_val, 2)} $/bbl",
+                "Brent-raakaöljy",
+                f"{_fmt(latest_val, 2)} USD/bbl",
                 f"{delta:+.1f}% (1 kk)" if delta is not None else "",
                 sub,
             )
