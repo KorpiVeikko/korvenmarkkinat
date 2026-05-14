@@ -64,6 +64,47 @@ def _series_by_date(df: pd.DataFrame, value_col: str = "Arvo", how: str = "mean"
     )
 
 
+def _pick_wood_price_series(
+    wood_df: pd.DataFrame,
+    labels_to_match: list[str],
+) -> pd.DataFrame:
+    if wood_df is None or wood_df.empty:
+        return pd.DataFrame()
+
+    ptl_col = find_first_matching_column(
+        wood_df,
+        ["Puutavaralaji", "PTL"],
+    )
+
+    if ptl_col is None:
+        return pd.DataFrame()
+
+    f = wood_df.copy()
+
+    matched_frames = []
+
+    labels = f[ptl_col].dropna().astype(str).unique().tolist()
+
+    for wanted in labels_to_match:
+        for label in labels:
+            if wanted.lower() in label.lower():
+                matched_frames.append(
+                    f[f[ptl_col].astype(str) == str(label)].copy()
+                )
+
+    if not matched_frames:
+        return pd.DataFrame()
+
+    combined = pd.concat(matched_frames, ignore_index=True)
+
+    return (
+        combined.groupby("Date", as_index=False)["Arvo"]
+        .mean()
+        .sort_values("Date")
+        .reset_index(drop=True)
+    )
+
+
 def _pick_wood_use_series(use_df: pd.DataFrame, terms: list[str]) -> pd.DataFrame:
     if use_df is None or use_df.empty:
         return pd.DataFrame()
@@ -89,6 +130,58 @@ def _pick_wood_use_series(use_df: pd.DataFrame, terms: list[str]) -> pd.DataFram
     return use_df[use_df[kt_col].astype(str) == str(chosen)].copy()
 
 
+def _pick_harvest_series(harvest_df: pd.DataFrame) -> pd.DataFrame:
+    if harvest_df is None or harvest_df.empty:
+        return pd.DataFrame()
+
+    mk_col = find_first_matching_column(harvest_df, ["Maakunta", "MK", "Alue"])
+    om_col = find_first_matching_column(harvest_df, ["Omistajaryhmä", "OM", "Omistaja"])
+    ptl_col = find_first_matching_column(harvest_df, ["Puutavaralaji", "PTL"])
+    pl_col = find_first_matching_column(harvest_df, ["Puulaji", "PL"])
+    info_col = find_first_matching_column(harvest_df, ["Tieto", "Tiedot"])
+
+    f = harvest_df.copy()
+
+    def _filter_total(col: str | None) -> None:
+        nonlocal f
+        if not col or col not in f.columns or f.empty:
+            return
+
+        values = f[col].dropna().astype(str).unique().tolist()
+        preferred = None
+
+        for term in ["koko maa", "yhteensä", "total"]:
+            for value in values:
+                if term in value.lower():
+                    preferred = value
+                    break
+            if preferred:
+                break
+
+        if preferred is not None:
+            f = f[f[col].astype(str) == str(preferred)].copy()
+
+    if info_col and info_col in f.columns:
+        infos = f[info_col].dropna().astype(str).unique().tolist()
+        preferred_info = None
+
+        for value in infos:
+            txt = value.lower()
+            if "määrä" in txt or "volume" in txt:
+                preferred_info = value
+                break
+
+        if preferred_info is not None:
+            f = f[f[info_col].astype(str) == str(preferred_info)].copy()
+
+    _filter_total(mk_col)
+    _filter_total(om_col)
+    _filter_total(ptl_col)
+    _filter_total(pl_col)
+
+    return f
+
+
 def _status_from_pct(pct: float | None, positive_good: bool = True) -> tuple[str, str]:
     if pct is None or pd.isna(pct):
         return "⚪", "Ei dataa"
@@ -106,18 +199,6 @@ def _status_from_pct(pct: float | None, positive_good: bool = True) -> tuple[str
     return "🔴", "Heikko"
 
 
-def _fmt_pct(x: float | None) -> str:
-    if x is None or pd.isna(x):
-        return "—"
-    return f"{x:+.1f} %"
-
-
-def _fmt_money_milj(x: float | None) -> str:
-    if x is None or pd.isna(x):
-        return "—"
-    return f"{x / 1_000_000:,.0f} milj. €".replace(",", " ")
-
-
 def _build_trade_analysis(months: int = 84) -> dict:
     exports_df, exports_debug = fetch_exports_products(months=months, lang="fi")
     imports_df, imports_debug = fetch_imports_products(months=months, lang="fi")
@@ -131,8 +212,6 @@ def _build_trade_analysis(months: int = 84) -> dict:
     if imports_df is not None and not imports_df.empty:
         forest_imports = imports_df[imports_df["Tuoteryhmä"].astype(str) == "Metsäteollisuus"].copy()
 
-    trade_df = pd.DataFrame()
-
     if not forest_exports.empty:
         e = forest_exports.groupby("Aika_dt", as_index=False)["Vienti_eur"].sum()
     else:
@@ -142,6 +221,8 @@ def _build_trade_analysis(months: int = 84) -> dict:
         i = forest_imports.groupby("Aika_dt", as_index=False)["Tuonti_eur"].sum()
     else:
         i = pd.DataFrame(columns=["Aika_dt", "Tuonti_eur"])
+
+    trade_df = pd.DataFrame()
 
     if not e.empty or not i.empty:
         trade_df = pd.merge(e, i, on="Aika_dt", how="outer").sort_values("Aika_dt")
@@ -180,6 +261,37 @@ def _build_trade_analysis(months: int = 84) -> dict:
     }
 
 
+def _build_strengths_risks_watchlist(indicators: list[dict]) -> tuple[list[str], list[str], list[str]]:
+    strengths: list[str] = []
+    risks: list[str] = []
+    watchlist: list[str] = []
+
+    for item in indicators:
+        name = item.get("Osa-alue", "")
+        pct = item.get("Muutos")
+
+        if pct is None or pd.isna(pct):
+            watchlist.append(f"{name}: dataa kannattaa seurata, kun uusi havainto päivittyy.")
+            continue
+
+        if pct >= 5:
+            strengths.append(f"{name}: kehitys on selvästi positiivinen ({pct:+.1f} %).")
+        elif pct <= -5:
+            risks.append(f"{name}: kehitys on selvästi negatiivinen ({pct:+.1f} %).")
+        else:
+            watchlist.append(f"{name}: tilanne on melko vakaa ({pct:+.1f} %).")
+
+    if not strengths:
+        strengths.append("Selviä vahvuuksia ei erottunut nykyisestä datasta.")
+
+    if not risks:
+        risks.append("Selviä riskisignaaleja ei erottunut nykyisestä datasta.")
+
+    watchlist.append("Seuraa erityisesti, liikkuvatko puun hinnat, puukauppa ja vienti samaan suuntaan vai alkavatko ne eriytyä.")
+
+    return strengths, risks, watchlist
+
+
 def build_forest_analysis_bundle(
     forest_bundle: dict,
     stocks_bundle: dict | None = None,
@@ -187,10 +299,35 @@ def build_forest_analysis_bundle(
 ) -> dict:
     wood_df = forest_bundle.get("wood_df", pd.DataFrame())
     industrial_df = forest_bundle.get("industrial_df", pd.DataFrame())
+    harvest_df = forest_bundle.get("harvest_df", pd.DataFrame())
     use_df = forest_bundle.get("use_df", pd.DataFrame())
 
     wood_price_series = _series_by_date(wood_df, "Arvo", how="mean")
+
+    pine_spruce_logs_series = _pick_wood_price_series(
+        wood_df,
+        ["Kuusitukki", "Mäntytukki"],
+    )
+
+    pine_spruce_pulp_series = _pick_wood_price_series(
+        wood_df,
+        ["Kuusikuitupuu", "Mäntykuitupuu"],
+    )
+
+    birch_logs_series = _pick_wood_price_series(
+        wood_df,
+        ["Koivutukki"],
+    )
+
+    birch_pulp_series = _pick_wood_price_series(
+        wood_df,
+        ["Koivukuitupuu"],
+    )
+
     industrial_series = _series_by_date(industrial_df, "Arvo", how="sum")
+
+    harvest_selected = _pick_harvest_series(harvest_df)
+    harvest_series = _series_by_date(harvest_selected, "Arvo", how="sum")
 
     industry_use_df = _pick_wood_use_series(use_df, ["metsäteoll"])
     energy_use_df = _pick_wood_use_series(use_df, ["energi"])
@@ -203,8 +340,40 @@ def build_forest_analysis_bundle(
     wood_price_latest, wood_price_yoy, wood_price_date = _latest_and_offset_pct(
         wood_price_series, "Date", "Arvo", pd.DateOffset(years=1)
     )
+
+    logs_latest, logs_yoy, logs_date = _latest_and_offset_pct(
+        pine_spruce_logs_series,
+        "Date",
+        "Arvo",
+        pd.DateOffset(years=1),
+    )
+
+    pulp_latest, pulp_yoy, pulp_date = _latest_and_offset_pct(
+        pine_spruce_pulp_series,
+        "Date",
+        "Arvo",
+        pd.DateOffset(years=1),
+    )
+
+    birch_logs_latest, birch_logs_yoy, birch_logs_date = _latest_and_offset_pct(
+        birch_logs_series,
+        "Date",
+        "Arvo",
+        pd.DateOffset(years=1),
+    )
+
+    birch_pulp_latest, birch_pulp_yoy, birch_pulp_date = _latest_and_offset_pct(
+        birch_pulp_series,
+        "Date",
+        "Arvo",
+        pd.DateOffset(years=1),
+    )
+
     industrial_latest, industrial_yoy, industrial_date = _latest_and_offset_pct(
         industrial_series, "Date", "Arvo", pd.DateOffset(years=1)
+    )
+    harvest_latest, harvest_yoy, harvest_date = _latest_and_offset_pct(
+        harvest_series, "Date", "Arvo", pd.DateOffset(years=1)
     )
     industry_use_latest, industry_use_yoy, industry_use_date = _latest_and_offset_pct(
         industry_use_series, "Date", "Arvo", pd.DateOffset(years=1)
@@ -232,33 +401,13 @@ def build_forest_analysis_bundle(
     trade = _build_trade_analysis(months=months)
 
     indicators = [
-        {
-            "Osa-alue": "Puun hinnat",
-            "Muutos": wood_price_yoy,
-            "Ikoni": _status_from_pct(wood_price_yoy)[0],
-            "Tila": _status_from_pct(wood_price_yoy)[1],
-            "Selite": "Keskimääräinen kantohintataso suhteessa vuoden takaiseen.",
-        },
+        
         {
             "Osa-alue": "Teollinen puukauppa",
             "Muutos": industrial_yoy,
             "Ikoni": _status_from_pct(industrial_yoy)[0],
             "Tila": _status_from_pct(industrial_yoy)[1],
             "Selite": "Puukaupan määrä suhteessa vuoden takaiseen.",
-        },
-        {
-            "Osa-alue": "Metsäteollisuuden puunkäyttö",
-            "Muutos": industry_use_yoy,
-            "Ikoni": _status_from_pct(industry_use_yoy)[0],
-            "Tila": _status_from_pct(industry_use_yoy)[1],
-            "Selite": "Teollisuuden käyttämän raakapuun muutos.",
-        },
-        {
-            "Osa-alue": "Energiapuun käyttö",
-            "Muutos": energy_use_yoy,
-            "Ikoni": _status_from_pct(energy_use_yoy)[0],
-            "Tila": _status_from_pct(energy_use_yoy)[1],
-            "Selite": "Energiakäytön kehitys.",
         },
         {
             "Osa-alue": "Metsäteollisuuden vienti",
@@ -331,13 +480,6 @@ def build_forest_analysis_bundle(
         else:
             summary_parts.append("Puukaupan määrä on melko lähellä vuoden takaista tasoa.")
 
-    if industry_use_yoy is not None:
-        if industry_use_yoy > 3:
-            summary_parts.append("Metsäteollisuuden puunkäyttö on kasvussa, mikä tukee kuvaa teollisesta kysynnästä.")
-        elif industry_use_yoy < -3:
-            summary_parts.append("Metsäteollisuuden puunkäyttö on laskussa, mikä kertoo kysynnän heikkenemisestä.")
-        else:
-            summary_parts.append("Metsäteollisuuden puunkäyttö on kokonaisuutena vakaa.")
 
     if trade["export_yoy"] is not None:
         if trade["export_yoy"] > 5:
@@ -355,14 +497,66 @@ def build_forest_analysis_bundle(
         else:
             summary_parts.append("Metsäyhtiöiden osakemarkkinatunnelma on melko neutraali.")
 
+    summary_parts.append(
+        "Hakkuut ja puunkäyttö jätetään pääsuhdannearviosta pois, koska niiden viimeisimmät havainnot päivittyvät viiveellä."
+    )
+
     if not summary_parts:
         summary_parts.append("Metsäsektorista ei saatu riittävästi dataa analyysin muodostamiseen.")
+
+    analysis_indicators = [
+        {
+            "Osa-alue": "Puun hinnat",
+            "Muutos": wood_price_yoy,
+            "Ikoni": _status_from_pct(wood_price_yoy)[0],
+            "Tila": _status_from_pct(wood_price_yoy)[1],
+            "Selite": "Keskimääräinen puunhintataso suhteessa vuoden takaiseen.",
+        },
+        *indicators,
+    ]
+
+    strengths, risks, watchlist = _build_strengths_risks_watchlist(analysis_indicators)
 
     return {
         "cycle_icon": cycle_icon,
         "cycle_label": cycle_label,
         "cycle_score": avg_score,
         "summary": " ".join(summary_parts),
+        "strengths": strengths,
+        "risks": risks,
+        "watchlist": watchlist,
+        "price_breakdown": [
+            {
+                "Nimi": "Keskimääräinen puunhinta",
+                "Muutos": wood_price_yoy,
+                "Tila": _status_from_pct(wood_price_yoy)[1],
+                "Ikoni": _status_from_pct(wood_price_yoy)[0],
+            },
+            {
+                "Nimi": "Havutukit",
+                "Muutos": logs_yoy,
+                "Tila": _status_from_pct(logs_yoy)[1],
+                "Ikoni": _status_from_pct(logs_yoy)[0],
+            },
+            {
+                "Nimi": "Havukuitupuu",
+                "Muutos": pulp_yoy,
+                "Tila": _status_from_pct(pulp_yoy)[1],
+                "Ikoni": _status_from_pct(pulp_yoy)[0],
+            },
+            {
+                "Nimi": "Koivutukki",
+                "Muutos": birch_logs_yoy,
+                "Tila": _status_from_pct(birch_logs_yoy)[1],
+                "Ikoni": _status_from_pct(birch_logs_yoy)[0],
+            },
+            {
+                "Nimi": "Koivukuitupuu",
+                "Muutos": birch_pulp_yoy,
+                "Tila": _status_from_pct(birch_pulp_yoy)[1],
+                "Ikoni": _status_from_pct(birch_pulp_yoy)[0],
+            },
+        ],
         "indicators": indicators,
         "trade": trade,
         "metrics": {
@@ -372,6 +566,9 @@ def build_forest_analysis_bundle(
             "industrial_latest": industrial_latest,
             "industrial_yoy": industrial_yoy,
             "industrial_date": industrial_date,
+            "harvest_latest": harvest_latest,
+            "harvest_yoy": harvest_yoy,
+            "harvest_date": harvest_date,
             "industry_use_latest": industry_use_latest,
             "industry_use_yoy": industry_use_yoy,
             "industry_use_date": industry_use_date,
@@ -383,5 +580,17 @@ def build_forest_analysis_bundle(
             "total_use_date": total_use_date,
             "stock_1m_avg": stock_1m_avg,
             "stock_1y_avg": stock_1y_avg,
+            "logs_latest": logs_latest,
+            "logs_yoy": logs_yoy,
+            "logs_date": logs_date,
+            "pulp_latest": pulp_latest,
+            "pulp_yoy": pulp_yoy,
+            "pulp_date": pulp_date,
+            "birch_logs_latest": birch_logs_latest,
+            "birch_logs_yoy": birch_logs_yoy,
+            "birch_logs_date": birch_logs_date,
+            "birch_pulp_latest": birch_pulp_latest,
+            "birch_pulp_yoy": birch_pulp_yoy,
+            "birch_pulp_date": birch_pulp_date,
         },
     }
