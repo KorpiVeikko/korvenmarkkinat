@@ -86,9 +86,30 @@ def latest_period_values(df: pd.DataFrame, value_col: str = "Close") -> dict:
     now = float(d.iloc[-1][value_col])
     latest_date = pd.to_datetime(d.iloc[-1]["Date"])
 
-    v1m = _closest_value_before_or_on(d, latest_date - pd.DateOffset(months=1), value_col)
-    v1y = _closest_value_before_or_on(d, latest_date - pd.DateOffset(years=1), value_col)
-    v5y = _closest_value_before_or_on(d, latest_date - pd.DateOffset(years=5), value_col)
+    def value_near_offset(offset: pd.DateOffset, max_extra_days: int = 45) -> float | None:
+        target = latest_date - offset
+
+        # Ensisijaisesti lähin havainto tavoitepäivää ennen tai samana päivänä
+        before = d[d["Date"] <= target]
+        if not before.empty:
+            return float(before.iloc[-1][value_col])
+
+        # Jos data ei aivan yllä tavoitepäivään, hyväksytään lähin havainto tavoitepäivän jälkeen
+        after = d[d["Date"] > target]
+        if after.empty:
+            return None
+
+        first_after = after.iloc[0]
+        days_after = (pd.to_datetime(first_after["Date"]) - target).days
+
+        if days_after <= max_extra_days:
+            return float(first_after[value_col])
+
+        return None
+
+    v1m = value_near_offset(pd.DateOffset(months=1), max_extra_days=7)
+    v1y = value_near_offset(pd.DateOffset(years=1), max_extra_days=21)
+    v5y = value_near_offset(pd.DateOffset(years=5), max_extra_days=90)
 
     return {
         "now": now,
