@@ -40,34 +40,55 @@ def safe_number_card(
         st.caption(caption)
 
 
+def _closest_value_before_or_on(
+    df: pd.DataFrame,
+    target_date: pd.Timestamp,
+    value_col: str,
+    date_col: str = "Date",
+) -> float | None:
+    if df is None or df.empty or date_col not in df.columns or value_col not in df.columns:
+        return None
+
+    d = df.copy()
+    d[date_col] = pd.to_datetime(d[date_col], errors="coerce")
+    d[value_col] = pd.to_numeric(d[value_col], errors="coerce")
+    d = d.dropna(subset=[date_col, value_col]).sort_values(date_col)
+
+    older = d[d[date_col] <= target_date]
+    if older.empty:
+        return None
+
+    return float(older.iloc[-1][value_col])
+
+
 def latest_period_values(df: pd.DataFrame, value_col: str = "Close") -> dict:
-    if df is None or df.empty or value_col not in df.columns:
-        return {
-            "now": None,
-            "1m": None,
-            "1y": None,
-            "5y": None,
-            "pct_1m": None,
-            "pct_1y": None,
-            "pct_5y": None,
-        }
+    empty = {
+        "now": None,
+        "1m": None,
+        "1y": None,
+        "5y": None,
+        "pct_1m": None,
+        "pct_1y": None,
+        "pct_5y": None,
+    }
 
-    s = pd.to_numeric(df[value_col], errors="coerce").dropna()
-    if s.empty:
-        return {
-            "now": None,
-            "1m": None,
-            "1y": None,
-            "5y": None,
-            "pct_1m": None,
-            "pct_1y": None,
-            "pct_5y": None,
-        }
+    if df is None or df.empty or value_col not in df.columns or "Date" not in df.columns:
+        return empty
 
-    now = float(s.iloc[-1])
-    v1m = float(s.iloc[-21]) if len(s) > 21 else None
-    v1y = float(s.iloc[-252]) if len(s) > 252 else None
-    v5y = float(s.iloc[0]) if len(s) > 0 else None
+    d = df.copy()
+    d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
+    d[value_col] = pd.to_numeric(d[value_col], errors="coerce")
+    d = d.dropna(subset=["Date", value_col]).sort_values("Date").reset_index(drop=True)
+
+    if d.empty:
+        return empty
+
+    now = float(d.iloc[-1][value_col])
+    latest_date = pd.to_datetime(d.iloc[-1]["Date"])
+
+    v1m = _closest_value_before_or_on(d, latest_date - pd.DateOffset(months=1), value_col)
+    v1y = _closest_value_before_or_on(d, latest_date - pd.DateOffset(years=1), value_col)
+    v5y = _closest_value_before_or_on(d, latest_date - pd.DateOffset(years=5), value_col)
 
     return {
         "now": now,
