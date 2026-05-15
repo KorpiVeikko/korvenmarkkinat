@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import streamlit as st
+import pandas as pd
 
 from services.construction_charts import (
     render_construction_area,
@@ -34,6 +35,22 @@ from services.realestate_pxweb import (
     fetch_realestate_counts,
     fetch_realestate_prices,
 )
+
+from services.realestate_analysis import build_realestate_analysis_bundle
+
+
+def _info_card(title: str, value: str, delta: str | None = None, caption: str | None = None) -> None:
+    with st.container(border=True):
+        st.metric(title, value, delta)
+        if caption:
+            st.caption(caption)
+
+
+def _section_card(title: str, caption: str | None = None) -> None:
+    with st.container(border=True):
+        st.markdown(f"### {title}")
+        if caption:
+            st.caption(caption)
 
 
 def _render_asunnot_tab() -> None:
@@ -168,34 +185,48 @@ def _render_tontti_metrics(
     alue_nelio_df,
     lkm_total_df,
 ) -> None:
-    st.markdown("#### Koko maa")
-    c1, c2, c3 = st.columns(3)
+    st.markdown("### 📌 Tonttimarkkinan pikakuva")
 
     hinta_value, hinta_delta = _metric_value_and_yoy(koko_hinta_df, value_fmt=",.1f")
     real_value, real_delta = _metric_value_and_yoy(koko_real_df, value_fmt=",.1f")
     lkm_value, lkm_delta = _metric_value_and_yoy(lkm_total_df, value_fmt=",.0f")
 
+    c1, c2, c3 = st.columns(3)
+
     with c1:
-        st.metric("Hintaindeksi", hinta_value, hinta_delta)
+        _info_card(
+            "Hintaindeksi",
+            hinta_value,
+            hinta_delta,
+            "Koko maa, omakotitalotontit",
+        )
+
     with c2:
-        st.metric("Reaalihintaindeksi", real_value, real_delta)
+        _info_card(
+            "Reaalihintaindeksi",
+            real_value,
+            real_delta,
+            "Inflaation huomioiva hintakehitys",
+        )
+
     with c3:
-        st.metric("Kauppojen lukumäärä", lkm_value, lkm_delta)
+        _info_card(
+            "Kauppojen määrä",
+            lkm_value,
+            lkm_delta,
+            "Markkina-aktiivisuus",
+        )
 
-    st.markdown("#### Neliöhinnat alueittain")
-    c1, c2, c3, c4 = st.columns(4)
+    st.markdown("### 🗺️ Neliöhinnat alueittain")
 
-    regions = [
-        ("Etelä-Suomi", c1),
-        ("Länsi-Suomi", c2),
-        ("Itä-Suomi", c3),
-        ("Pohjois-Suomi", c4),
-    ]
+    regions = ["Etelä-Suomi", "Länsi-Suomi", "Itä-Suomi", "Pohjois-Suomi"]
+    cols = st.columns(4)
 
-    for region, col in regions:
+    for region, col in zip(regions, cols):
         value, delta = _latest_region_nelio_metric(alue_nelio_df, region)
         with col:
-            st.metric(region, value, delta)
+            _info_card(region, value, delta, "Viimeisin €/m²")
+
 
 def _render_tontti_ai_summary(
     koko_hinta_df,
@@ -265,6 +296,7 @@ def _render_tontti_ai_summary(
 
     st.info(" ".join(parts))
 
+
 def _render_tontit_tab() -> None:
     st.subheader("🏡 Omakotitalotontit")
     st.caption("Lähde: Tilastokeskus / PXWeb")
@@ -291,11 +323,17 @@ def _render_tontit_tab() -> None:
 
         lkm_total_df = aggregate_trade_counts(lkm_df)
 
-        st.markdown("### 📌 Yhteenveto")
         _render_tontti_metrics(koko_hinta_df, koko_real_df, alue_nelio_df, lkm_total_df)
+
+        st.markdown("### 🧠 Tulkinta")
         _render_tontti_ai_summary(koko_hinta_df, koko_real_df, alue_nelio_df, lkm_total_df)
 
-        st.markdown("### 📈 Hintakehitys")
+        st.divider()
+
+        _section_card(
+            "📈 Hintakehitys",
+            "Hintaindeksi kertoo nimellisen hintakehityksen. Reaalihintaindeksi näyttää kehityksen inflaation jälkeen.",
+        )
         render_tontti_selected_area_index_chart(
             koko_hinta_df,
             koko_real_df,
@@ -303,13 +341,23 @@ def _render_tontit_tab() -> None:
             alue_real_df,
         )
 
-        st.markdown("### 💶 Hintataso")
+        st.divider()
+
+        _section_card(
+            "💶 Hintataso",
+            "Neliöhinta kertoo tonttien keskimääräisen hintatason euroina per neliömetri.",
+        )
         render_tontti_selected_area_nelio_chart(
             koko_nelio_df,
             alue_nelio_df,
         )
 
-        st.markdown("### 🏷️ Markkina-aktiivisuus")
+        st.divider()
+
+        _section_card(
+            "🏷️ Markkina-aktiivisuus",
+            "Kauppamäärä kertoo, kuinka vilkas tonttimarkkina on ollut.",
+        )
         render_tontti_kauppamaara_chart(lkm_df)
 
         with st.expander("🗺️ Aluevertailu: neliöhinnat", expanded=False):
@@ -333,19 +381,152 @@ def _render_construction_tab() -> None:
             st.warning("Rakentamisen dataa ei saatu.")
             return
 
-        render_construction_leading_indicator(df)
-        render_construction_koko_maa(df)
-        render_construction_area(df)
+        with st.container(border=True):
+            st.markdown("### 🧭 Rakentamisen tilannekuva")
+            st.caption(
+                "Rakennusluvat toimivat ennakoivana mittarina. "
+                "Valmistuneet kertovat toteutuneesta tarjonnasta ja rakenteilla olevat lähiajan tuotannosta."
+            )
+            render_construction_leading_indicator(df)
+
+        st.divider()
+
+        with st.container(border=True):
+            st.markdown("### 📈 Koko maan rakentaminen")
+            st.caption("12 kuukauden kertymä tasoittaa kuukausittaista vaihtelua.")
+            render_construction_koko_maa(df)
+
+        st.divider()
+
+        with st.container(border=True):
+            st.markdown("### 🗺️ Alueellinen rakentaminen")
+            st.caption("Valitse maakunta ja vertaile lupia, rakenteilla olevia sekä valmistuneita asuntoja.")
+            render_construction_area(df)
 
     except Exception as e:
         st.error(f"Rakentamisdata ei latautunut: {e}")
 
 
+@st.cache_data(ttl=60 * 60 * 6, show_spinner="Rakennetaan kiinteistömarkkinan analyysiä…")
+def load_realestate_analysis_bundle() -> dict:
+    df_counts = add_yoy_change_quarterly(clean_realestate_df(fetch_realestate_counts()))
+    df_prices = add_yoy_change_quarterly(clean_realestate_df(fetch_realestate_prices()))
+
+    tontti_df = clean_detached_plot_df(fetch_detached_plot_data())
+
+    construction_df = fetch_construction_data()
+    construction_df = clean_construction_df(construction_df)
+    construction_df = add_construction_features(construction_df)
+    construction_df = filter_last_n_years(construction_df, years=10)
+
+    return build_realestate_analysis_bundle(
+        df_counts=df_counts,
+        df_prices=df_prices,
+        tontti_df=tontti_df,
+        construction_df=construction_df,
+    )
+
+
+def _analysis_pct_color(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "#6b7280"
+    return "#15803d" if value >= 0 else "#b91c1c"
+
+
+def _analysis_pct_html(value: float | None, label: str = "1 v") -> str:
+    if value is None or pd.isna(value):
+        txt = "—"
+    else:
+        sign = "+" if value >= 0 else ""
+        txt = f"{sign}{value:.1f} % ({label})"
+
+    return f"""
+    <span style="
+        color:{_analysis_pct_color(value)};
+        font-weight:700;
+        font-size:1.05rem;
+    ">
+        {txt}
+    </span>
+    """
+
+
+def _render_realestate_indicator_card(item: dict) -> None:
+    with st.container(border=True):
+        st.markdown(f"### {item.get('Ikoni', '⚪')} {item.get('Osa-alue', '')}")
+        st.markdown(f"**Tila:** {item.get('Tila', '—')}")
+        st.markdown(_analysis_pct_html(item.get("Muutos")), unsafe_allow_html=True)
+        st.caption(item.get("Selite", ""))
+
+
+def _render_realestate_analysis_tab() -> None:
+    st.subheader("🧠 Kiinteistömarkkinan analyysi")
+    st.caption(
+        "Yhdistää asuntojen, tonttien ja rakentamisen datan yhdeksi helposti luettavaksi markkinakuvaksi."
+    )
+
+    try:
+        bundle = load_realestate_analysis_bundle()
+    except Exception as e:
+        st.error(f"Kiinteistömarkkinan analyysi ei latautunut: {e}")
+        return
+
+    with st.container(border=True):
+        st.markdown(f"## {bundle.get('cycle_icon', '⚪')} {bundle.get('cycle_label', 'Ei dataa')}")
+        st.write(bundle.get("summary", ""))
+
+    st.divider()
+
+    st.markdown("### 📌 Tilaindikaattorit")
+
+    indicators = bundle.get("indicators", [])
+    if indicators:
+        for i in range(0, len(indicators), 3):
+            cols = st.columns(3)
+            for col, item in zip(cols, indicators[i : i + 3]):
+                with col:
+                    _render_realestate_indicator_card(item)
+
+    st.divider()
+
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        with st.container(border=True):
+            st.markdown("### ✅ Vahvuudet")
+            for item in bundle.get("strengths", []):
+                st.write(f"• {item}")
+
+    with c2:
+        with st.container(border=True):
+            st.markdown("### ⚠️ Riskit")
+            for item in bundle.get("risks", []):
+                st.write(f"• {item}")
+
+    with c3:
+        with st.container(border=True):
+            st.markdown("### 👀 Seurattavaa")
+            for item in bundle.get("watchlist", []):
+                st.write(f"• {item}")
+
+    st.divider()
+
+    st.info(
+        "Tämä analyysi ei ole sijoitus- tai ostopäätössuositus. Se kokoaa usean datalähteen yhteen: "
+        "kauppamäärät kuvaavat kysyntää, hinnat markkinatasoa ja rakennusluvat tulevan tarjonnan suuntaa."
+    )
+
 def render():
     st.subheader("🏡 Kiinteistöt ja rakentaminen")
-    
-    tab_asunnot, tab_pelto, tab_tontit, tab_rakentaminen = st.tabs(
-        ["🏠 Asunnot", "🌾 Peltomaa", "🏡 Omakotitalotontit", "🏗️ Rakentaminen"]
+
+    tab_asunnot, tab_pelto, tab_tontit, tab_rakentaminen, tab_analyysi = st.tabs(
+        [
+            "🏠 Asunnot",
+            "🌾 Peltomaa",
+            "🏡 Omakotitalotontit",
+            "🏗️ Rakentaminen",
+            "🧠 Kiinteistömarkkinan analyysi",
+        ]
     )
 
     with tab_asunnot:
@@ -359,3 +540,6 @@ def render():
 
     with tab_rakentaminen:
         _render_construction_tab()
+
+    with tab_analyysi:
+        _render_realestate_analysis_tab()

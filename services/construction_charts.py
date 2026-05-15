@@ -138,8 +138,7 @@ def render_construction_leading_indicator(df: pd.DataFrame) -> None:
     st.info(msg)
 
 
-def render_construction_koko_maa(df: pd.DataFrame) -> None:
-    st.subheader("📈 Rakentaminen – koko maa")
+def render_construction_koko_maa(df: pd.DataFrame) -> None: 
 
     koko = df[df["Alue"] == "Koko maa"].copy()
     if koko.empty:
@@ -168,7 +167,6 @@ def render_construction_koko_maa(df: pd.DataFrame) -> None:
 
 
 def render_construction_area(df: pd.DataFrame) -> None:
-    st.subheader("🗺️ Rakentaminen alueittain")
 
     alueet = sorted([a for a in df["Alue"].dropna().unique() if a != "Koko maa"])
     if not alueet:
