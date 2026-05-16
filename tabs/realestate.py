@@ -39,6 +39,46 @@ from services.realestate_pxweb import (
 from services.realestate_analysis import build_realestate_analysis_bundle
 
 
+def _pct_color(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "#6b7280"
+    return "#15803d" if value >= 0 else "#b91c1c"
+
+
+def _pct_html(value: float | None, label: str = "1 v") -> str:
+    if value is None or pd.isna(value):
+        txt = "—"
+    else:
+        txt = f"{value:+.1f} % ({label})"
+
+    return f"""
+    <span style="
+        color:{_pct_color(value)};
+        font-weight:700;
+        font-size:1.05rem;
+    ">
+        {txt}
+    </span>
+    """
+
+
+def _metric_card(
+    title: str,
+    value: str,
+    pct: float | None = None,
+    caption: str | None = None,
+) -> None:
+    with st.container(border=True):
+        st.caption(title)
+        st.markdown(f"## {value}")
+
+        if pct is not None and not pd.isna(pct):
+            st.markdown(_pct_html(pct), unsafe_allow_html=True)
+
+        if caption:
+            st.caption(caption)
+
+
 def _info_card(title: str, value: str, delta: str | None = None, caption: str | None = None) -> None:
     with st.container(border=True):
         st.metric(title, value, delta)
@@ -64,23 +104,43 @@ def _render_asunnot_tab() -> None:
         st.error(f"Asuntodata ei latautunut: {e}")
         return
 
-    c1, c2 = st.columns(2)
+    st.markdown("### 📌 Tilannekuva")
+
+    c1, c2, c3, c4 = st.columns(4)
 
     latest_counts, yoy_counts = latest_and_yoy(df_counts)
+    latest_prices, yoy_prices = latest_and_yoy(df_prices)
+
+    count_status = "🟢 Vilkastuva" if (yoy_counts or 0) > 5 else "🔴 Heikko" if (yoy_counts or 0) < -5 else "🟡 Vakaa"
+    price_status = "🟢 Nousussa" if (yoy_prices or 0) > 5 else "🔴 Laskussa" if (yoy_prices or 0) < -5 else "🟡 Vakaa"
+
     with c1:
-        st.metric(
-            "Asuntokauppojen lukumäärä",
+        _metric_card(
+            "Asuntokauppojen määrä",
             f"{latest_counts:,.0f}".replace(",", " ") if latest_counts is not None else "—",
-            f"{yoy_counts:+.1f} % (1v)" if yoy_counts is not None else None,
+            yoy_counts,
+            "Kvartaali"
         )
 
-    latest_prices, yoy_prices = latest_and_yoy(df_prices)
     with c2:
-        st.metric(
+        _metric_card(
             "Uusien asuntojen neliöhinta",
             f"{latest_prices:,.0f} €/m²".replace(",", " ") if latest_prices is not None else "—",
-            f"{yoy_prices:+.1f} % (1v)" if yoy_prices is not None else None,
+            yoy_prices,
+            "Koko maa"
         )
+
+    with c3:
+        with st.container(border=True):
+            st.markdown("### 🏘️ Asuntomarkkina")
+            st.markdown(f"**Tila:** {count_status}")
+            st.caption("Perustuu asuntokauppojen määrän vuosimuutokseen.")
+
+    with c4:
+        with st.container(border=True):
+            st.markdown("### 💶 Hintakehitys")
+            st.markdown(f"**Tila:** {price_status}")
+            st.caption("Perustuu uusien asuntojen neliöhinnan vuosimuutokseen.")
 
     st.subheader("📊 Asuntokauppojen lukumäärä")
     render_asunnot_counts_chart(df_counts)
@@ -141,6 +201,67 @@ def _render_peltomaa_tab() -> None:
 
         koko_maa_df = add_yoy_change_yearly(koko_maa_df)
         alue_df = add_yoy_change_yearly(alue_df)
+
+        latest_val, latest_yoy = latest_and_yoy(koko_maa_df)
+
+        latest_region_rows = (
+            alue_df.sort_values("Vuosi")
+            .groupby("Alue", as_index=False)
+            .tail(1)
+        )
+
+        highest_region = None
+        lowest_region = None
+
+        if not latest_region_rows.empty:
+            highest_region = latest_region_rows.sort_values("Arvo", ascending=False).iloc[0]
+            lowest_region = latest_region_rows.sort_values("Arvo", ascending=True).iloc[0]
+
+        st.markdown("### 📌 Tilannekuva")
+
+        c1, c2, c3, c4 = st.columns(4)
+
+        with c1:
+            _metric_card(
+                f"Peltomaan {series_label}",
+                f"{latest_val:,.0f} €/ha".replace(",", " ") if latest_val is not None else "—",
+                latest_yoy,
+                "Koko maa"
+            )
+
+        with c2:
+            if highest_region is not None:
+                _metric_card(
+                    "Korkein alue",
+                    highest_region["Alue"],
+                    None,
+                    f'{highest_region["Arvo"]:,.0f} €/ha'.replace(",", " ")
+                )
+
+        with c3:
+            if lowest_region is not None:
+                _metric_card(
+                    "Matalin alue",
+                    lowest_region["Alue"],
+                    None,
+                    f'{lowest_region["Arvo"]:,.0f} €/ha'.replace(",", " ")
+                )
+
+        with c4:
+            with st.container(border=True):
+                if latest_yoy is not None:
+                    if latest_yoy > 5:
+                        status = "🟢 Vahva nousu"
+                    elif latest_yoy < -5:
+                        status = "🔴 Heikentyvä"
+                    else:
+                        status = "🟡 Vakaa"
+                else:
+                    status = "⚪ Ei dataa"
+
+                st.markdown("### 🌾 Markkinatila")
+                st.markdown(f"**Tila:** {status}")
+                st.caption("Perustuu koko maan vuosimuutokseen.")
 
         _render_pelto_koko_maa(koko_maa_df, series_label)
         _render_pelto_alueet(alue_df, series_label)
