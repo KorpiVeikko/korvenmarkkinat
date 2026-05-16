@@ -30,6 +30,8 @@ from services.macro_view_helpers import (
     render_wages_section,
 )
 
+from services.macro_analysis_view import render_macro_analysis
+
 
 YEARS = 8
 MONTHS = YEARS * 12
@@ -52,6 +54,7 @@ def render() -> None:
         "📥 Tuonti",
         "⚖️ Kauppatase",
         "🏦 Velka",
+        "🧠 Analyysi",
     ]
 
     section = st.radio(
@@ -63,7 +66,34 @@ def render() -> None:
 
     st.divider()
 
-    if section == "📈 Inflaatio":
+    if section == "🧠 Analyysi":
+
+        infl = load_inflation()
+        gdp_yoy = load_gdp_yoy()
+        unemp = load_unemployment()
+        wages = load_wages()
+
+        debt_pct = load_debt_pct_gdp()
+
+        exports_total_df, imports_total_df = load_trade_totals(MONTHS)
+
+        from services.macro_data import build_trade_balance
+
+        trade_balance_df = build_trade_balance(
+            exports_total_df,
+            imports_total_df,
+        )
+
+        render_macro_analysis(
+            inflation_df=infl,
+            gdp_df=gdp_yoy,
+            unemployment_df=unemp,
+            wages_df=wages,
+            debt_df=debt_pct,
+            trade_balance_df=trade_balance_df,
+        )
+
+    elif section == "📈 Inflaatio":
         infl = load_inflation()
         render_inflation_section(infl, YEARS)
 
