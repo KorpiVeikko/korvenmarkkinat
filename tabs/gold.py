@@ -239,7 +239,7 @@ def render() -> None:
     st.divider()
 
     tab_analysis, tab_gold, tab_silver, tab_ratio = st.tabs(
-        ["🧠 Analyysi", "🥇 Kulta", "🥈 Hopea", "⚖️ Kulta / hopea"]
+        ["🥇 Kulta", "🥈 Hopea", "⚖️ Kulta / hopea", "🧠 Analyysi"]
     )
 
     with tab_analysis:

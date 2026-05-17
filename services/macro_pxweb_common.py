@@ -211,29 +211,31 @@ def add_quarter_date(df: pd.DataFrame) -> pd.DataFrame:
 
     out = df.copy()
 
-    time_col = next(
-        (
-            c
-            for c in out.columns
-            if str(c).strip().lower() in {"vuosineljännes", "vuosineljannes", "quarter", "time"}
-        ),
-        None,
-    )
+    time_col = None
+    for col in out.columns:
+        c = str(col).lower()
+        if (
+            "vuosineljännes" in c
+            or "vuosineljannes" in c
+            or "quarter" in c
+            or c == "aika"
+            or c == "time"
+        ):
+            time_col = col
+            break
+
     if time_col is None:
-        time_col = out.columns[0]
+        return out
 
-    s = out[time_col].astype(str).str.strip()
-    out["Aika"] = s
+    # Esim. "2025Q4*" -> "2025Q4"
+    q = (
+        out[time_col]
+        .astype(str)
+        .str.extract(r"(\d{4}Q[1-4])", expand=False)
+    )
 
-    q = s.str.extract(r"^(?P<y>\d{4})Q(?P<q>\d)$")
-    if q["y"].notna().any():
-        start_month = (pd.to_numeric(q["q"], errors="coerce") - 1) * 3 + 1
-        out["Date"] = pd.to_datetime(
-            q["y"] + "-" + start_month.astype("Int64").astype(str).str.zfill(2) + "-01",
-            errors="coerce",
-        )
-    else:
-        out["Date"] = pd.to_datetime(s, errors="coerce")
+    out["Date"] = pd.PeriodIndex(q, freq="Q").to_timestamp(how="start")
+    out = out.dropna(subset=["Date"]).copy()
 
     return out
 

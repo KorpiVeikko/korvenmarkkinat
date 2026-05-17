@@ -74,6 +74,7 @@ def render() -> None:
         wages = load_wages()
 
         debt_pct = load_debt_pct_gdp()
+        hh_debt_pct_gdi = load_household_debt_pct_gdi()
 
         exports_total_df, imports_total_df = load_trade_totals(MONTHS)
 
@@ -91,6 +92,7 @@ def render() -> None:
             wages_df=wages,
             debt_df=debt_pct,
             trade_balance_df=trade_balance_df,
+            household_debt_df=hh_debt_pct_gdi,
         )
 
     elif section == "📈 Inflaatio":

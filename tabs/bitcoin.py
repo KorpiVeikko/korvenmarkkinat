@@ -367,7 +367,7 @@ def render() -> None:
     st.divider()
 
     tab_analysis, tab_price, tab_drawdown, tab_volume = st.tabs(
-        ["🧠 Analyysi", "💹 Hinta", "📉 Drawdown", "📦 Volyymi"]
+        ["💹 Hinta", "📉 Drawdown", "📦 Volyymi", "🧠 Analyysi"]
     )
 
     with tab_analysis:
