@@ -692,6 +692,202 @@ def ecb_fetch_household_loans_mio(geo: str = "FI") -> tuple[pd.DataFrame, dict]:
     return pd.DataFrame(columns=["Date", "household_loans_mio"]), debug
 
 
+def _parse_ecb_monthly_sdmx_json(payload: dict, value_name: str) -> tuple[pd.DataFrame, dict]:
+    debug = {
+        "ok": False,
+        "error": None,
+        "rows": 0,
+        "sample": [],
+    }
+
+    try:
+        data_sets = payload.get("dataSets", [])
+        if not data_sets:
+            debug["error"] = "dataSets puuttuu."
+            return pd.DataFrame(columns=["Date", value_name]), debug
+
+        series_block = data_sets[0].get("series", {})
+        obs_dims = payload.get("structure", {}).get("dimensions", {}).get("observation", [])
+
+        if not obs_dims:
+            debug["error"] = "Observation-dimensiot puuttuvat."
+            return pd.DataFrame(columns=["Date", value_name]), debug
+
+        time_values = obs_dims[0].get("values", [])
+        time_map = {}
+
+        for idx, item in enumerate(time_values):
+            if isinstance(item, dict):
+                time_map[str(idx)] = str(item.get("id") or item.get("name"))
+            else:
+                time_map[str(idx)] = str(item)
+
+        rows = []
+
+        for _, series in series_block.items():
+            observations = series.get("observations", {})
+
+            for obs_idx, obs_val in observations.items():
+                period = time_map.get(str(obs_idx))
+                if period is None:
+                    continue
+
+                value = obs_val[0] if isinstance(obs_val, list) and obs_val else obs_val
+
+                rows.append(
+                    {
+                        "Period": period,
+                        value_name: pd.to_numeric(value, errors="coerce"),
+                    }
+                )
+
+        df = pd.DataFrame(rows)
+        if df.empty:
+            debug["error"] = "Rivejä ei muodostunut."
+            return pd.DataFrame(columns=["Date", value_name]), debug
+
+        df[value_name] = pd.to_numeric(df[value_name], errors="coerce")
+        df["Date"] = pd.to_datetime(df["Period"], errors="coerce")
+
+        df = df.dropna(subset=["Date", value_name]).sort_values("Date").reset_index(drop=True)
+
+        debug["ok"] = not df.empty
+        debug["rows"] = len(df)
+        debug["sample"] = df.tail(3).to_dict(orient="records")
+
+        return df[["Date", value_name]], debug
+
+    except Exception as ex:
+        debug["error"] = f"{type(ex).__name__}: {ex}"
+        return pd.DataFrame(columns=["Date", value_name]), debug
+
+
+def ecb_fetch_euribor_12m() -> tuple[pd.DataFrame, dict]:
+    debug = {
+        "source": "ECB",
+        "series_key": "M.U2.EUR.RT.MM.EURIBOR1YD_.HSTA",
+        "url": None,
+        "http_status": None,
+        "ok": False,
+        "error": None,
+        "parse_debug": {},
+    }
+
+    url = f"{ECB_API_BASE}/FM/{debug['series_key']}"
+    debug["url"] = url
+
+    try:
+        response = requests.get(
+            url,
+            headers={"Accept": "application/json"},
+            timeout=45,
+        )
+        debug["http_status"] = response.status_code
+        response.raise_for_status()
+
+        payload = response.json()
+        df, parse_debug = _parse_ecb_monthly_sdmx_json(payload, "euribor_12m")
+        debug["parse_debug"] = parse_debug
+        debug["ok"] = not df.empty
+
+        return df, debug
+
+    except Exception as ex:
+        debug["error"] = f"{type(ex).__name__}: {ex}"
+        return pd.DataFrame(columns=["Date", "euribor_12m"]), debug
+    
+
+def fetch_gdp_demand_components_yoy() -> pd.DataFrame:
+    meta = get_px_meta(GDP_132H_URL)
+    variables = meta.get("variables") or []
+    if not variables:
+        return pd.DataFrame()
+
+    time_code = find_time_code(meta) or "Vuosineljännes"
+    tx_code = "Taloustoimi"
+    info_code = "Tiedot"
+
+    component_specs = {
+        "BKT": ["b1gmh", "bruttokansantuote"],
+        "Yksityinen kulutus": ["yksityiset kulutusmenot"],
+        "Julkinen kulutus": ["julkiset kulutusmenot"],
+        "Investoinnit": ["kiinteän pääoman bruttomuodostus", "investoinnit"],
+        "Vienti": ["vienti"],
+        "Tuonti": ["tuonti"],
+    }
+
+    selected_values = []
+    value_to_name = {}
+
+    for name, needles in component_specs.items():
+        val = pick_value_no_fallback(meta, tx_code, needles)
+        if val and val not in selected_values:
+            selected_values.append(val)
+            value_to_name[str(val)] = name
+
+    if not selected_values:
+        return pd.DataFrame()
+
+    info_yoy = (
+        pick_value(meta, info_code, ["%", "edellisestä vuodesta"], fallback_first=False)
+        or pick_value(meta, info_code, ["edellisestä vuodesta"], fallback_first=False)
+        or pick_value(meta, info_code, ["vuosimuutos", "%"], fallback_first=True)
+    )
+
+    query = {
+        "query": [
+            {"code": tx_code, "selection": {"filter": "item", "values": selected_values}},
+            {"code": info_code, "selection": {"filter": "item", "values": [info_yoy] if info_yoy else ["*"]}},
+            {"code": time_code, "selection": {"filter": "all", "values": ["*"]}},
+        ],
+        "response": {"format": "json-stat2"},
+    }
+
+    df = add_time_columns(post_px(GDP_132H_URL, query))
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    f = df.copy()
+    f["Arvo"] = pd.to_numeric(f["Arvo"], errors="coerce")
+    f = f.dropna(subset=["Aika_dt", "Arvo"]).sort_values("Aika_dt")
+
+    if f.empty or tx_code not in f.columns:
+        return pd.DataFrame()
+
+    f["Komponentti"] = f[tx_code].astype(str).map(value_to_name)
+
+    # Jos PXWeb palauttaa tekstin eikä koodia, tunnistetaan vielä tekstistä.
+    missing = f["Komponentti"].isna()
+    if missing.any():
+        txt = f.loc[missing, tx_code].astype(str).str.lower()
+
+        f.loc[missing & txt.str.contains("bruttokansantuote", na=False), "Komponentti"] = "BKT"
+        f.loc[missing & txt.str.contains("yksityiset kulutusmenot", na=False), "Komponentti"] = "Yksityinen kulutus"
+        f.loc[missing & txt.str.contains("julkiset kulutusmenot", na=False), "Komponentti"] = "Julkinen kulutus"
+        f.loc[missing & txt.str.contains("kiinteän pääoman bruttomuodostus|investoin", na=False, regex=True), "Komponentti"] = "Investoinnit"
+        f.loc[missing & txt.str.contains("vienti", na=False), "Komponentti"] = "Vienti"
+        f.loc[missing & txt.str.contains("tuonti", na=False), "Komponentti"] = "Tuonti"
+
+    f = f.dropna(subset=["Komponentti"])
+
+    return (
+        f[["Aika_dt", "Komponentti", "Arvo"]]
+        .rename(columns={"Aika_dt": "Date", "Arvo": "gdp_component_yoy"})
+        .sort_values(["Komponentti", "Date"])
+        .reset_index(drop=True)
+    )
+
+
+@st.cache_data(show_spinner="Haetaan BKT:n kysyntäerät…")
+def load_gdp_demand_components_yoy() -> pd.DataFrame:
+    return fetch_gdp_demand_components_yoy()
+
+
+@st.cache_data(show_spinner="Haetaan 12 kk Euribor (ECB)…")
+def load_euribor_12m() -> tuple[pd.DataFrame, dict]:
+    return ecb_fetch_euribor_12m()
+
+
 @st.cache_data(show_spinner="Haetaan inflaatio (Tilastokeskus)…")
 def load_inflation() -> pd.DataFrame:
     return build_inflation_series(fetch_inflation_yoy())

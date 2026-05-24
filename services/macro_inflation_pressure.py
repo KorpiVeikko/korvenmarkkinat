@@ -90,41 +90,38 @@ def _find_code(var: dict, *terms: str) -> str | None:
     return None
 
 
-def _fetch_total_yoy(months: int = 96) -> pd.DataFrame:
-    variables = _px_get_metadata(CPI_TOTAL_YOY_URL)
+# lisää aiempaan tiedostoon: sarjoihin myös Indeksi, 3v ja 5v muutos
 
-    time_var = _time_var(variables)
-    time_code = str(time_var["code"])
-    time_values = _latest_months(time_var, months)
+def _add_long_term_changes(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+    out["Indeksi"] = pd.to_numeric(out["Indeksi"], errors="coerce")
+    out = out.dropna(subset=["Date", "Sarja", "Indeksi"]).sort_values(["Sarja", "Date"])
 
-    query = {
-        "query": [
-            {
-                "code": time_code,
-                "selection": {
-                    "filter": "item",
-                    "values": time_values,
-                },
-            },
-            {
-                "code": "Tiedot",
-                "selection": {
-                    "filter": "item",
-                    "values": ["Vuosimuutos"],
-                },
-            },
-        ],
-        "response": {"format": "json-stat2"},
-    }
+    rows = []
 
-    df = _px_post(CPI_TOTAL_YOY_URL, query)
-    df = df.rename(columns={"value": "Inflaatio"})
+    for _, g in out.groupby("Sarja"):
+        g = g.sort_values("Date").copy()
+        latest = g.iloc[-1]
+        latest_date = latest["Date"]
+        latest_index = float(latest["Indeksi"])
 
-    df["Date"] = df[time_code].map(_month_to_date)
-    df["Sarja"] = "Virallinen inflaatio"
-    df["Inflaatio"] = pd.to_numeric(df["Inflaatio"], errors="coerce")
+        def pct_from_years(years: int) -> float | None:
+            target = latest_date - pd.DateOffset(years=years)
+            prev = g[g["Date"] <= target]
+            if prev.empty:
+                return None
+            prev_index = float(prev.iloc[-1]["Indeksi"])
+            if prev_index == 0:
+                return None
+            return (latest_index / prev_index - 1.0) * 100.0
 
-    return df[["Date", "Sarja", "Inflaatio"]].dropna()
+        row = latest.to_dict()
+        row["Muutos_3v"] = pct_from_years(3)
+        row["Muutos_5v"] = pct_from_years(5)
+        rows.append(row)
+
+    return pd.DataFrame(rows)
 
 
 def _fetch_category_index(months: int = 108) -> pd.DataFrame:
@@ -149,17 +146,28 @@ def _fetch_category_index(months: int = 108) -> pd.DataFrame:
     info_code = str(info_var["code"])
     info_value = _find_code(info_var, "indeksi") or str(info_var.get("values", [])[0])
 
+    category_values = category_var.get("values", [])
+    first_category_code = str(category_values[0]) if category_values else None
+
     raw_picks = {
+        "Virallinen inflaatio": (
+            _find_code(category_var, "kokonaisindeksi")
+            or _find_code(category_var, "kuluttajahintaindeksi")
+            or _find_code(category_var, "kaikki")
+            or first_category_code
+        ),
         "Ruokainflaatio": _find_code(category_var, "elintarvikkeet"),
         "Energia": (
             _find_code(category_var, "sähkö", "kaasu")
             or _find_code(category_var, "sähkö")
+            or _find_code(category_var, "asuminen", "energia")
         ),
         "Polttoaineet": (
             _find_code(category_var, "polttoaineet")
             or _find_code(category_var, "polttoaine")
         ),
     }
+    
 
     category_picks: dict[str, str] = {}
     used_codes: set[str] = set()
@@ -218,42 +226,9 @@ def _fetch_category_index(months: int = 108) -> pd.DataFrame:
 
     df["Inflaatio"] = df.groupby("Sarja")["Indeksi"].pct_change(12) * 100.0
 
-    return df[["Date", "Sarja", "Inflaatio"]].dropna()
+    return df[["Date", "Sarja", "Indeksi", "Inflaatio"]].dropna(subset=["Date", "Sarja", "Indeksi"])
 
 
-def _build_household_pressure(series_df: pd.DataFrame) -> pd.DataFrame:
-    if series_df is None or series_df.empty:
-        return pd.DataFrame(columns=["Date", "Sarja", "Inflaatio"])
-
-    pivot = series_df.pivot_table(
-        index="Date",
-        columns="Sarja",
-        values="Inflaatio",
-        aggfunc="last",
-    ).sort_index()
-
-    if "Ruokainflaatio" not in pivot.columns:
-        return pd.DataFrame(columns=["Date", "Sarja", "Inflaatio"])
-
-    food = pivot["Ruokainflaatio"]
-    energy = pivot["Energia"] if "Energia" in pivot.columns else None
-    fuel = pivot["Polttoaineet"] if "Polttoaineet" in pivot.columns else None
-
-    if energy is not None and fuel is not None:
-        pressure = 0.5 * food + 0.3 * energy + 0.2 * fuel
-    elif energy is not None:
-        pressure = 0.6 * food + 0.4 * energy
-    elif fuel is not None:
-        pressure = 0.7 * food + 0.3 * fuel
-    else:
-        pressure = food
-
-    out = pressure.dropna().reset_index()
-    out["Sarja"] = "Kotitalouspaine"
-    out = out.rename(columns={0: "Inflaatio"})
-    out["Inflaatio"] = pd.to_numeric(out["Inflaatio"], errors="coerce")
-
-    return out[["Date", "Sarja", "Inflaatio"]].dropna()
 
 
 @st.cache_data(
@@ -262,19 +237,8 @@ def _build_household_pressure(series_df: pd.DataFrame) -> pd.DataFrame:
 )
 def load_inflation_pressure_bundle() -> dict:
     try:
-        total = _fetch_total_yoy()
-        categories = _fetch_category_index()
-        base = pd.concat([total, categories], ignore_index=True)
-
-        pressure = _build_household_pressure(base)
-        combined = pd.concat([base, pressure], ignore_index=True)
-
-        latest = (
-            combined.sort_values("Date")
-            .groupby("Sarja", as_index=False)
-            .tail(1)
-            .sort_values("Sarja")
-        )
+        combined = _fetch_category_index()
+        latest = _add_long_term_changes(combined)
 
         return {
             "ok": True,

@@ -404,6 +404,7 @@ def _latest_value_and_date(df: pd.DataFrame, date_col: str, value_col: str) -> t
     return float(d.iloc[-1][value_col]), pd.to_datetime(d.iloc[-1][date_col])
 
 
+
 def render_index_explainer(
     title: str = "ℹ️ Miten indeksejä luetaan?",
     include_real: bool = True,
@@ -463,46 +464,172 @@ def render_inflation_section(df: pd.DataFrame, years: int) -> None:
     st.plotly_chart(fig, width="stretch", key="macro_inflation_bar")
 
 
-def render_gdp_section(df: pd.DataFrame, years: int) -> None:
-    st.subheader("🏛️ BKT:n kasvu (YoY, kvartaali)")
-    st.caption("YoY = volyymin muutos verrattuna edellisvuoden vastaavaan neljännekseen (%).")
+def render_gdp_section(
+    df: pd.DataFrame,
+    years: int,
+    components_df: pd.DataFrame | None = None,
+) -> None:
+    st.subheader("🏛️ BKT ja talouskasvu")
+    st.caption(
+        "BKT YoY = volyymin muutos verrattuna edellisvuoden vastaavaan neljännekseen. "
+        "Kysyntäerät näyttävät, mistä talouskasvu tai heikkous tulee."
+    )
 
     if df is None or df.empty:
         st.warning("BKT YoY -dataa ei saatu.")
         return
 
-    g_vals = pd.to_numeric(df["gdp_yoy"], errors="coerce").dropna()
-    g_last = float(g_vals.iloc[-1]) if len(g_vals) else None
-    g_delta_y = _yoy_delta(df["gdp_yoy"], periods=4)
-    g_date = pd.to_datetime(df["Date"].iloc[-1]).date() if df["Date"].notna().any() else None
+    d_all = df.copy()
+    d_all["Date"] = pd.to_datetime(d_all["Date"], errors="coerce")
+    d_all["gdp_yoy"] = pd.to_numeric(d_all["gdp_yoy"], errors="coerce")
+    d_all = d_all.dropna(subset=["Date", "gdp_yoy"]).sort_values("Date")
 
-    kpi_card(
-        "BKT YoY",
-        fmt(g_last, 2, " %"),
-        f"{g_delta_y:+.2f} %-yks. (1 v)" if g_delta_y is not None else None,
-        f"Kvartaali: {g_date}" if g_date else None,
-    )
+    if d_all.empty:
+        st.warning("BKT YoY -sarja on tyhjä.")
+        return
+
+    g_last = float(d_all["gdp_yoy"].iloc[-1])
+    g_delta_y = _yoy_delta(d_all["gdp_yoy"], periods=4)
+    g_date = pd.to_datetime(d_all["Date"].iloc[-1]).date()
+
+    last_4q_avg = float(d_all["gdp_yoy"].tail(4).mean()) if len(d_all) >= 4 else None
+    last_5y_avg = float(d_all["gdp_yoy"].tail(20).mean()) if len(d_all) >= 20 else None
+
+    comp_latest = pd.DataFrame()
+    if components_df is not None and not components_df.empty:
+        comp_latest = (
+            components_df.copy()
+            .assign(Date=lambda x: pd.to_datetime(x["Date"], errors="coerce"))
+            .dropna(subset=["Date", "Komponentti", "gdp_component_yoy"])
+            .sort_values("Date")
+            .groupby("Komponentti", as_index=False)
+            .tail(1)
+        )
+
+    private_consumption = None
+    investments = None
+
+    if not comp_latest.empty:
+        pc = comp_latest[comp_latest["Komponentti"] == "Yksityinen kulutus"]
+        inv = comp_latest[comp_latest["Komponentti"] == "Investoinnit"]
+
+        if not pc.empty:
+            private_consumption = float(pc.iloc[-1]["gdp_component_yoy"])
+        if not inv.empty:
+            investments = float(inv.iloc[-1]["gdp_component_yoy"])
+
+    st.markdown("### 📌 Tilaindikaattorit")
+
+    c1, c2, c3, c4 = st.columns(4, gap="large")
+
+    with c1:
+        kpi_card(
+            "BKT YoY",
+            fmt(g_last, 2, " %"),
+            f"{g_delta_y:+.2f} %-yks. (1 v)" if g_delta_y is not None else None,
+            f"Kvartaali: {g_date}",
+        )
+
+    with c2:
+        kpi_card(
+            "BKT 4Q keskiarvo",
+            fmt(last_4q_avg, 2, " %"),
+            None,
+            "Viimeisten 4 neljänneksen keskimääräinen kasvuvauhti.",
+        )
+
+    with c3:
+        kpi_card(
+            "Yksityinen kulutus",
+            fmt(private_consumption, 2, " %"),
+            None,
+            "Viimeisin YoY-muutos.",
+        )
+
+    with c4:
+        kpi_card(
+            "Investoinnit",
+            fmt(investments, 2, " %"),
+            None,
+            "Viimeisin YoY-muutos.",
+        )
+
+    if last_5y_avg is not None:
+        st.caption(f"BKT:n keskimääräinen YoY-kasvu viimeisen 5 vuoden aikana: **{last_5y_avg:.2f} %**")
 
     st.divider()
 
-    d = clip_by_years(df, "Date", years)
-    d["gdp_yoy"] = pd.to_numeric(d["gdp_yoy"], errors="coerce")
-    d = d.dropna(subset=["Date", "gdp_yoy"]).sort_values("Date")
-    if d.empty:
-        st.warning("BKT YoY -sarja on tyhjä valitulla aikajänteellä.")
-        return
+    d = clip_by_years(d_all, "Date", years)
 
-    fig = px.line(
-        d,
-        x="Date",
-        y="gdp_yoy",
-        markers=True,
-        labels={"Date": "Kvartaali", "gdp_yoy": "BKT YoY (%)"},
-        title="BKT:n kasvuvauhti (YoY, %)",
-    )
-    fig.update_yaxes(ticksuffix=" %", zeroline=True)
-    _add_zero_line(fig)
-    st.plotly_chart(fig, width="stretch", key="macro_gdp_yoy_line")
+    tab_growth, tab_components = st.tabs(["📈 BKT:n kasvuvauhti", "🧩 Kysyntäerät"])
+
+    with tab_growth:
+        fig = px.line(
+            d,
+            x="Date",
+            y="gdp_yoy",
+            markers=True,
+            labels={"Date": "Kvartaali", "gdp_yoy": "BKT YoY (%)"},
+            title="BKT:n kasvuvauhti (YoY, %)",
+        )
+        fig.update_yaxes(ticksuffix=" %", zeroline=True)
+        _add_zero_line(fig)
+        st.plotly_chart(fig, width="stretch", key="macro_gdp_yoy_line")
+
+    with tab_components:
+        if components_df is None or components_df.empty:
+            st.info("BKT:n kysyntäerien dataa ei saatu.")
+            return
+
+        cdf = components_df.copy()
+        cdf["Date"] = pd.to_datetime(cdf["Date"], errors="coerce")
+        cdf["gdp_component_yoy"] = pd.to_numeric(cdf["gdp_component_yoy"], errors="coerce")
+        cdf = cdf.dropna(subset=["Date", "Komponentti", "gdp_component_yoy"])
+        cdf = clip_by_years(cdf, "Date", years)
+
+        if cdf.empty:
+            st.info("Kysyntäerien dataa ei löytynyt valitulle aikavälille.")
+            return
+
+        preferred = [
+            "BKT",
+            "Yksityinen kulutus",
+            "Julkinen kulutus",
+            "Investoinnit",
+            "Vienti",
+            "Tuonti",
+        ]
+
+        selected_components = st.multiselect(
+            "Valitse näytettävät kysyntäerät",
+            options=[x for x in preferred if x in cdf["Komponentti"].unique()],
+            default=[x for x in ["BKT", "Yksityinen kulutus", "Investoinnit", "Vienti"] if x in cdf["Komponentti"].unique()],
+            key="macro_gdp_components_select",
+        )
+
+        plot_df = cdf[cdf["Komponentti"].isin(selected_components)].copy()
+
+        if plot_df.empty:
+            st.info("Valitse vähintään yksi kysyntäerä.")
+            return
+
+        fig_comp = px.line(
+            plot_df,
+            x="Date",
+            y="gdp_component_yoy",
+            color="Komponentti",
+            markers=True,
+            title="BKT:n kysyntäerät – YoY-muutos",
+            labels={
+                "Date": "Kvartaali",
+                "gdp_component_yoy": "YoY (%)",
+                "Komponentti": "Erä",
+            },
+        )
+        fig_comp.update_yaxes(ticksuffix=" %", zeroline=True)
+        _add_zero_line(fig_comp)
+        fig_comp.update_layout(hovermode="x unified")
+        st.plotly_chart(fig_comp, width="stretch", key="macro_gdp_components_line")
 
 
 
@@ -1285,4 +1412,152 @@ def render_private_debt_section(
     else:
         st.info("Lainakantadataa ei löytynyt.")
 
-    
+
+def _inflation_status(value: float | None) -> tuple[str, str]:
+    if value is None or pd.isna(value):
+        return "⚪", "Ei dataa"
+
+    if value < 2:
+        return "🟢", "Vakaa"
+    if value < 5:
+        return "🟡", "Paineita"
+    return "🔴", "Korkea paine"
+
+
+
+def render_inflation_pressure_section(bundle: dict) -> None:
+    st.subheader("🧺 Arjen inflaatiopaine")
+    st.caption("Virallinen inflaatio, arjen hintapaineet ja pidemmän aikavälin hintojen nousu.")
+
+    def _long_inflation_status(value: float | None) -> tuple[str, str]:
+        if value is None or pd.isna(value):
+            return "⚪", "Ei dataa"
+
+        if value < 10:
+            return "🟢", "Maltillinen"
+        if value < 25:
+            return "🟡", "Selvä hintojen nousu"
+        return "🔴", "Voimakas hintojen nousu"
+
+    if not bundle or not bundle.get("ok"):
+        st.warning("Tarkempia inflaatiomittareita ei saatu ladattua.")
+        if bundle and bundle.get("error"):
+            with st.expander("Tekninen virhe"):
+                st.code(bundle["error"])
+        return
+
+    latest = bundle.get("latest", pd.DataFrame())
+    series_df = bundle.get("series", pd.DataFrame())
+
+    if latest.empty:
+        st.info("Inflaatiomittareita ei löytynyt.")
+        return
+
+    preferred_order = [
+        "Virallinen inflaatio",
+        "Ruokainflaatio",
+        "Energia",
+        "Polttoaineet",
+    ]
+
+    latest = latest.copy()
+    latest["order"] = latest["Sarja"].map({x: i for i, x in enumerate(preferred_order)}).fillna(99)
+    latest = latest.sort_values("order")
+
+    st.markdown("### 📌 Nykyinen vuosimuutos")
+
+    cols = st.columns(min(4, len(latest)))
+
+    for i, (_, row) in enumerate(latest.iterrows()):
+        value = row.get("Inflaatio")
+        value = float(value) if pd.notna(value) else None
+        icon, status = _inflation_status(value)
+
+        with cols[i % len(cols)]:
+            with st.container(border=True):
+                st.markdown(f"### {icon} {row['Sarja']}")
+                st.markdown(f"**Tila:** {status}")
+                st.metric("Vuosimuutos", f"{value:.1f} %" if value is not None else "—")
+                st.caption(f"Viimeisin: {pd.to_datetime(row['Date']).date()}")
+
+    st.markdown("### ⏳ Pidemmän aikavälin hintamuutos")
+
+    cols = st.columns(min(4, len(latest)))
+
+    for i, (_, row) in enumerate(latest.iterrows()):
+        m3 = row.get("Muutos_3v")
+        m5 = row.get("Muutos_5v")
+
+        m3_val = float(m3) if pd.notna(m3) else None
+        m5_val = float(m5) if pd.notna(m5) else None
+
+        icon, status = _long_inflation_status(m5_val)
+
+        with cols[i % len(cols)]:
+            with st.container(border=True):
+                st.markdown(f"### {icon} {row['Sarja']}")
+                st.markdown(f"**Tila:** {status}")
+                st.metric(
+                    "5 v muutos",
+                    f"{m5_val:+.1f} %" if m5_val is not None else "—",
+                )
+                st.caption(
+                    f"3 v: {m3_val:+.1f} %" if m3_val is not None else "3 v: —"
+                )
+
+    st.divider()
+
+    plot_df = series_df.copy()
+    plot_df["Date"] = pd.to_datetime(plot_df["Date"], errors="coerce")
+    plot_df["Indeksi"] = pd.to_numeric(plot_df["Indeksi"], errors="coerce")
+    plot_df = plot_df.dropna(subset=["Date", "Sarja", "Indeksi"])
+
+    if plot_df.empty:
+        st.info("Pitkän aikavälin indeksikuvaajaa ei voitu muodostaa.")
+        return
+
+    plot_df = plot_df[plot_df["Sarja"].isin(preferred_order)].copy()
+
+    start_date = plot_df["Date"].max() - pd.DateOffset(years=5)
+    plot_df = plot_df[plot_df["Date"] >= start_date].copy()
+
+    norm_frames = []
+
+    for name, g in plot_df.groupby("Sarja"):
+        g = g.sort_values("Date").copy()
+        first_values = g["Indeksi"].dropna()
+
+        if first_values.empty:
+            continue
+
+        first = float(first_values.iloc[0])
+
+        if first == 0:
+            continue
+
+        g["Indeksi_100"] = g["Indeksi"] / first * 100.0
+        norm_frames.append(g)
+
+    if not norm_frames:
+        st.info("Normalisoitua indeksikuvaajaa ei voitu muodostaa.")
+        return
+
+    norm_df = pd.concat(norm_frames, ignore_index=True)
+    norm_df["order"] = norm_df["Sarja"].map({x: i for i, x in enumerate(preferred_order)}).fillna(99)
+    norm_df = norm_df.sort_values(["order", "Date"])
+
+    fig = px.line(
+        norm_df,
+        x="Date",
+        y="Indeksi_100",
+        color="Sarja",
+        title="Hintojen kehitys viimeisen 5 vuoden aikana, alku = 100",
+        labels={
+            "Date": "Aika",
+            "Indeksi_100": "Indeksi, alku = 100",
+            "Sarja": "Mittari",
+        },
+    )
+
+    fig.update_layout(hovermode="x unified")
+    st.plotly_chart(fig, width="stretch")

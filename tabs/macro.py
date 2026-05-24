@@ -5,6 +5,7 @@ import streamlit as st
 from services.macro_data import (
     load_debt_mio_eur,
     load_debt_pct_gdp,
+    load_euribor_12m,
     load_gdp_yoy,
     load_household_debt_pct_gdi,
     load_household_debt_pct_gdp,
@@ -16,12 +17,15 @@ from services.macro_data import (
     load_trade_totals,
     load_unemployment,
     load_wages,
+    build_trade_balance,
+    load_gdp_demand_components_yoy,
 )
 from services.macro_view_helpers import (
     EXPORT_CFG,
     IMPORT_CFG,
     render_debt_section,
     render_gdp_section,
+    render_inflation_pressure_section,
     render_inflation_section,
     render_private_debt_section,
     render_trade_balance_section,
@@ -29,8 +33,8 @@ from services.macro_view_helpers import (
     render_unemployment_section,
     render_wages_section,
 )
-
 from services.macro_analysis_view import render_macro_analysis
+from services.macro_inflation_pressure import load_inflation_pressure_bundle
 
 
 YEARS = 8
@@ -66,42 +70,18 @@ def render() -> None:
 
     st.divider()
 
-    if section == "🧠 Analyysi":
+    if section == "📈 Inflaatio":
+        pressure_bundle = load_inflation_pressure_bundle()
+        render_inflation_pressure_section(pressure_bundle)
 
-        infl = load_inflation()
-        gdp_yoy = load_gdp_yoy()
-        unemp = load_unemployment()
-        wages = load_wages()
-
-        debt_pct = load_debt_pct_gdp()
-        hh_debt_pct_gdi = load_household_debt_pct_gdi()
-
-        exports_total_df, imports_total_df = load_trade_totals(MONTHS)
-
-        from services.macro_data import build_trade_balance
-
-        trade_balance_df = build_trade_balance(
-            exports_total_df,
-            imports_total_df,
-        )
-
-        render_macro_analysis(
-            inflation_df=infl,
-            gdp_df=gdp_yoy,
-            unemployment_df=unemp,
-            wages_df=wages,
-            debt_df=debt_pct,
-            trade_balance_df=trade_balance_df,
-            household_debt_df=hh_debt_pct_gdi,
-        )
-
-    elif section == "📈 Inflaatio":
-        infl = load_inflation()
-        render_inflation_section(infl, YEARS)
+        with st.expander("📊 Näytä vanha virallinen inflaatiokuvaaja", expanded=False):
+            infl = load_inflation()
+            render_inflation_section(infl, YEARS)
 
     elif section == "🏛️ BKT":
         gdp_yoy = load_gdp_yoy()
-        render_gdp_section(gdp_yoy, YEARS)
+        gdp_components = load_gdp_demand_components_yoy()
+        render_gdp_section(gdp_yoy, YEARS, gdp_components)
 
     elif section == "🧑‍💼 Työttömyys":
         unemp = load_unemployment()
@@ -154,3 +134,30 @@ def render() -> None:
                 nfc_loans_debug=None,
                 years=YEARS,
             )
+
+    elif section == "🧠 Analyysi":
+        infl = load_inflation()
+        gdp_yoy = load_gdp_yoy()
+        unemp = load_unemployment()
+        wages = load_wages()
+
+        debt_pct = load_debt_pct_gdp()
+        hh_debt_pct_gdi = load_household_debt_pct_gdi()
+        euribor_12m, _ = load_euribor_12m()
+
+        exports_total_df, imports_total_df = load_trade_totals(MONTHS)
+        trade_balance_df = build_trade_balance(
+            exports_total_df,
+            imports_total_df,
+        )
+
+        render_macro_analysis(
+            inflation_df=infl,
+            gdp_df=gdp_yoy,
+            unemployment_df=unemp,
+            wages_df=wages,
+            debt_df=debt_pct,
+            trade_balance_df=trade_balance_df,
+            household_debt_df=hh_debt_pct_gdi,
+            interest_df=euribor_12m,
+        )

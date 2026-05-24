@@ -92,23 +92,45 @@ def _pct_color(value: float | None, positive_good: bool = True) -> str:
     return "#15803d" if v >= 0 else "#b91c1c"
 
 
-def _pct_html(value: float | None, label: str = "1 v", positive_good: bool = True) -> str:
+def _pct_html(
+    value: float | None,
+    label: str = "",
+    positive_good: bool = True,
+) -> str:
+
     if value is None or pd.isna(value):
-        txt = "—"
+        return ""
+
+    is_positive = value >= 0
+    good = is_positive if positive_good else not is_positive
+
+    color = "#15803d" if good else "#b91c1c"
+
+    if "muutos 1 v" in label:
+        txt = fmt_money(value)
+
+        if value > 0:
+            txt = f"+{txt}"
+
+        txt = f"{txt} ({label})"
+
+    elif "kotitaloussignaali" in label:
+        txt = f"{value:+.1f} pistettä"
+
+    elif "%-yks." in label:
+        txt = f"{value:+.1f} {label}"
+
     else:
-        if "%-yks." in label:
-            txt = f"{value:+.1f} {label}"
-        else:
-            txt = f"{value:+.1f} % ({label})"
+        txt = f"{value:+.1f} % ({label})"
 
     return f"""
-    <span style="
-        color:{_pct_color(value, positive_good=positive_good)};
+    <div style="
+        color:{color};
         font-weight:700;
-        font-size:1.05rem;
+        margin-top:0.4rem;
     ">
         {txt}
-    </span>
+    </div>
     """
 
 
@@ -281,21 +303,17 @@ def _household_status(
     inflation_now: float | None,
     unemployment_now: float | None,
     household_debt_pct_gdi: float | None,
+    euribor_12m: float | None,
 ) -> tuple[str, str, float | None]:
 
-    if (
-        wage_yoy is None
-        or inflation_now is None
-    ):
+    if wage_yoy is None or inflation_now is None:
         return "⚪", "Ei dataa", None
 
     score = 0.0
 
-    # Ostovoima
     purchasing_power = wage_yoy - inflation_now
     score += purchasing_power
 
-    # Työttömyys rasittaa
     if unemployment_now is not None:
         if unemployment_now > 9:
             score -= 1.5
@@ -304,7 +322,6 @@ def _household_status(
         else:
             score += 0.5
 
-    # Kotitalouksien velka
     if household_debt_pct_gdi is not None:
         if household_debt_pct_gdi > 140:
             score -= 1.5
@@ -313,12 +330,20 @@ def _household_status(
         else:
             score += 0.5
 
+    if euribor_12m is not None:
+        if euribor_12m > 4.0:
+            score -= 1.5
+        elif euribor_12m > 2.5:
+            score -= 1.0
+        elif euribor_12m > 1.5:
+            score -= 0.5
+        else:
+            score += 0.5
+
     if score >= 2:
         return "🟢", "Vahvistuu", score
-
     if score <= -1:
         return "🔴", "Heikkenee", score
-
     return "🟡", "Paineessa", score
 
 
@@ -331,6 +356,7 @@ def render_macro_analysis(
     debt_df: pd.DataFrame,
     trade_balance_df: pd.DataFrame,
     household_debt_df: pd.DataFrame,
+    interest_df: pd.DataFrame,
 ) -> None:
     st.subheader("🧠 Makrotalouden analyysi")
     st.caption("Yhteenveto Suomen makrotalouden keskeisistä mittareista.")
@@ -341,6 +367,8 @@ def render_macro_analysis(
     debt_now = _latest(debt_df, "debt_pct_gdp")
     trade_now = _latest(trade_balance_df, "Kauppatase_eur")
     household_debt_now = _latest(household_debt_df, "household_debt_pct_gdi")
+    euribor_now = _latest(interest_df, "euribor_12m")
+    euribor_change = _delta_points(interest_df, "euribor_12m", periods=12)
 
     wage_yoy = _latest(wages_df, "wage_index_yoy_pct")
 
@@ -354,6 +382,7 @@ def render_macro_analysis(
         inflation_now=inflation_now,
         unemployment_now=unemployment_now,
         household_debt_pct_gdi=household_debt_now,
+        euribor_12m=euribor_now,
     )
 
     inflation_change = _delta_points(inflation_df, "inflation_yoy", periods=12)
@@ -371,16 +400,11 @@ def render_macro_analysis(
             latest_trade = float(trade_series.iloc[-1])
             prev_trade = float(trade_series.iloc[-13])
 
-            if prev_trade != 0:
-                raw_change = (latest_trade / prev_trade - 1.0) * 100.0
-
-                # Kauppataseessa suurempi euromääräinen arvo on parempi:
-                # -200 milj. € on parempi kuin -500 milj. €
-                # +300 milj. € on parempi kuin +100 milj. €
-                trade_change_good = latest_trade > prev_trade
-
-                # Jos alijäämä kasvaa, näytetään muutos negatiivisena.
-                trade_change = abs(raw_change) if trade_change_good else -abs(raw_change)
+            # Kauppataseessa absoluuttinen euromääräinen muutos on selkeämpi kuin prosentti.
+                # Positiivinen muutos = kauppatase paranee.
+            # Negatiivinen muutos = kauppatase heikkenee.
+            trade_change = latest_trade - prev_trade
+            trade_change_good = trade_change >= 0
 
     score, state_icon, state_label = _macro_state_score(
         inflation_now=inflation_now,
@@ -429,18 +453,20 @@ def render_macro_analysis(
         },
         {
             "name": "Kotitaloudet",
-            "label": "Ostovoimasignaali",
+            "label": "Kotitaloussignaali",
             "value": household_signal,
-            "formatted_value": hh_status,
-            "change": household_signal,
-            "change_label": "palkat − inflaatio * velka %",
+            "formatted_value": f"{household_signal:+.1f} pistettä" if household_signal is not None else "—",
+            "change": None,
+            "change_label": "",
             "positive_good": True,
             "icon": hh_icon,
             "status": hh_status,
             "caption": (
                 f"Palkat {fmt(wage_yoy, 1, ' %')} • "
                 f"inflaatio {fmt(inflation_now, 1, ' %')} • "
-                f"velka {fmt(household_debt_now, 0, ' % GDI')}"
+                f"työttömyys {fmt(unemployment_now, 1, ' %')} • "
+                f"velka {fmt(household_debt_now, 0, ' % GDI')} • "
+                f"Euribor 12 kk {fmt(euribor_now, 2, ' %')}"
             ),
         },
         {
@@ -461,11 +487,23 @@ def render_macro_analysis(
             "value": trade_now,
             "formatted_value": fmt_money(trade_now),
             "change": trade_change,
-            "change_label": "1 v",
-            "positive_good": trade_change_good,
+            "change_label": "muutos 1 v",
+            "positive_good": True,
             "icon": _status_from_metric("Kauppatase", trade_now)[0],
             "status": _status_from_metric("Kauppatase", trade_now)[1],
             "caption": f"Viimeisin havainto: {_latest_trade_date(trade_balance_df)}",
+        },
+        {
+            "name": "Korkopaine",
+            "label": "12 kk Euribor",
+            "value": euribor_now,
+            "formatted_value": fmt(euribor_now, 2, " %"),
+            "change": euribor_change,
+            "change_label": "%-yks. (1 v)",
+            "positive_good": False,
+            "icon": "🔴" if euribor_now is not None and euribor_now > 3 else "🟡" if euribor_now is not None and euribor_now > 1.5 else "🟢",
+            "status": "Korkea" if euribor_now is not None and euribor_now > 3 else "Koholla" if euribor_now is not None and euribor_now > 1.5 else "Kevyt",
+            "caption": f"Viimeisin havainto: {_latest_date(interest_df, 'euribor_12m')}",
         },
     ]
 
