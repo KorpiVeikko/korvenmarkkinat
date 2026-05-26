@@ -403,6 +403,209 @@ def _latest_value_and_date(df: pd.DataFrame, date_col: str, value_col: str) -> t
 
     return float(d.iloc[-1][value_col]), pd.to_datetime(d.iloc[-1][date_col])
 
+def _gdp_status(value: float | None) -> tuple[str, str]:
+    if value is None or pd.isna(value):
+        return "⚪", "Ei dataa"
+    if value >= 1.5:
+        return "🟢", "Kasvu vahvistuu"
+    if value >= 0:
+        return "🟡", "Hidas kasvu"
+    return "🔴", "Talous supistuu"
+
+
+def _component_status(value: float | None, name: str) -> tuple[str, str]:
+    if value is None or pd.isna(value):
+        return "⚪", "Ei dataa"
+
+    if name == "Investoinnit" and value < 0:
+        return "🔴", "Investoinnit laskussa"
+
+    if value >= 1:
+        return "🟢", "Tukee kasvua"
+    if value >= 0:
+        return "🟡", "Heikko tuki"
+    return "🔴", "Jarruttaa kasvua"
+
+
+def _build_gdp_driver_text(
+    gdp_now: float | None,
+    private_consumption: float | None,
+    investments: float | None,
+) -> str:
+    parts = []
+
+    if gdp_now is not None:
+        if gdp_now < 0:
+            parts.append("BKT on supistumassa, joten talouden kokonaiskuva on heikko.")
+        elif gdp_now < 1:
+            parts.append("BKT kasvaa vain hitaasti, eli talous on lähellä nollakasvua.")
+        else:
+            parts.append("BKT kasvaa selvästi, mikä viittaa vahvempaan suhdannekuvaan.")
+
+    if private_consumption is not None:
+        if private_consumption > 1:
+            parts.append("Yksityinen kulutus tukee kasvua.")
+        elif private_consumption >= 0:
+            parts.append("Yksityinen kulutus kasvaa vain maltillisesti.")
+        else:
+            parts.append("Yksityinen kulutus jarruttaa taloutta.")
+
+    if investments is not None:
+        if investments < 0:
+            parts.append("Investointien lasku on selvä riskisignaali tulevalle kasvulle.")
+        elif investments < 1:
+            parts.append("Investoinnit ovat vaisut, mikä voi rajoittaa tulevaa kasvua.")
+        else:
+            parts.append("Investoinnit tukevat talouden kasvupohjaa.")
+
+    if not parts:
+        return "BKT:n ajureista ei saatu riittävästi dataa tulkinnan muodostamiseen."
+
+    return " ".join(parts)
+
+
+def _unemployment_status(value: float | None) -> tuple[str, str]:
+    if value is None or pd.isna(value):
+        return "⚪", "Ei dataa"
+
+    if value < 7:
+        return "🟢", "Matala"
+    if value < 9:
+        return "🟡", "Koholla"
+    return "🔴", "Korkea"
+
+
+def _unemployment_trend_status(delta_pp: float | None) -> tuple[str, str]:
+    if delta_pp is None or pd.isna(delta_pp):
+        return "⚪", "Ei dataa"
+
+    if delta_pp <= -0.5:
+        return "🟢", "Paranee"
+    if delta_pp < 0.5:
+        return "🟡", "Vakaa"
+    return "🔴", "Heikkenee"
+
+
+def _build_unemployment_text(
+    latest_rate: float | None,
+    rate_delta_1y: float | None,
+    latest_level: float | None,
+    level_delta_1y: float | None,
+) -> str:
+    parts = []
+
+    if latest_rate is not None:
+        if latest_rate >= 9:
+            parts.append("Työttömyysaste on korkea, mikä kertoo työmarkkinan selvästä paineesta.")
+        elif latest_rate >= 7:
+            parts.append("Työttömyysaste on koholla, mutta ei vielä erittäin heikolla tasolla.")
+        else:
+            parts.append("Työttömyysaste on matala, mikä tukee kotitalouksien ostovoimaa.")
+
+    if rate_delta_1y is not None:
+        if rate_delta_1y >= 0.5:
+            parts.append("Työttömyysaste on noussut vuoden aikana, eli työmarkkinatilanne on heikentynyt.")
+        elif rate_delta_1y <= -0.5:
+            parts.append("Työttömyysaste on laskenut vuoden aikana, mikä viittaa työmarkkinan paranemiseen.")
+        else:
+            parts.append("Työttömyysaste on pysynyt melko vakaana vuoden takaiseen nähden.")
+
+    if level_delta_1y is not None:
+        if level_delta_1y > 5:
+            parts.append("Työttömien henkilöiden määrä on kasvanut selvästi.")
+        elif level_delta_1y < -5:
+            parts.append("Työttömien henkilöiden määrä on vähentynyt selvästi.")
+        else:
+            parts.append("Työttömien henkilöiden määrä on muuttunut vain maltillisesti.")
+
+    if not parts:
+        return "Työttömyyden tulkintaa ei voitu muodostaa puuttuvien tietojen vuoksi."
+
+    return " ".join(parts)
+
+
+def _wage_power_status(real_yoy: float | None) -> tuple[str, str]:
+    if real_yoy is None or pd.isna(real_yoy):
+        return "⚪", "Ei dataa"
+
+    if real_yoy >= 1:
+        return "🟢", "Ostovoima paranee"
+    if real_yoy > -1:
+        return "🟡", "Ostovoima vakaa"
+    return "🔴", "Ostovoima heikkenee"
+
+
+def _pct_change_over_years(
+    df: pd.DataFrame,
+    date_col: str,
+    value_col: str,
+    years: int,
+) -> float | None:
+    if df is None or df.empty or value_col not in df.columns:
+        return None
+
+    d = df.copy()
+    d[date_col] = pd.to_datetime(d[date_col], errors="coerce")
+    d[value_col] = pd.to_numeric(d[value_col], errors="coerce")
+    d = d.dropna(subset=[date_col, value_col]).sort_values(date_col)
+
+    if d.empty:
+        return None
+
+    latest_date = d.iloc[-1][date_col]
+    latest_val = float(d.iloc[-1][value_col])
+
+    target = latest_date - pd.DateOffset(years=years)
+    prev = d[d[date_col] <= target]
+
+    if prev.empty:
+        return None
+
+    prev_val = float(prev.iloc[-1][value_col])
+    if prev_val == 0:
+        return None
+
+    return (latest_val / prev_val - 1.0) * 100.0
+
+
+def _build_wage_text(
+    wage_yoy: float | None,
+    index_yoy: float | None,
+    real_yoy: float | None,
+    wage_5y: float | None,
+    real_5y: float | None,
+) -> str:
+    parts = []
+
+    if wage_yoy is not None:
+        if wage_yoy > 3:
+            parts.append("Nimellispalkat kasvavat selvästi.")
+        elif wage_yoy > 0:
+            parts.append("Nimellispalkat kasvavat maltillisesti.")
+        else:
+            parts.append("Nimellispalkat eivät kasva, mikä heikentää tulokehitystä.")
+
+    if real_yoy is not None:
+        if real_yoy > 1:
+            parts.append("Reaaliansiot ovat nousussa, eli palkat kasvavat hintoja nopeammin.")
+        elif real_yoy > -1:
+            parts.append("Reaaliansiot ovat melko vakaat, eli ostovoima ei juuri muutu.")
+        else:
+            parts.append("Reaaliansiot laskevat, eli hintojen nousu syö palkkakehitystä.")
+
+    if wage_5y is not None and real_5y is not None:
+        if wage_5y > real_5y + 5:
+            parts.append("Viiden vuoden tarkastelussa nimellispalkat ovat nousseet selvästi enemmän kuin reaaliansiot, mikä kertoo inflaation painaneen ostovoimaa.")
+        elif real_5y > 0:
+            parts.append("Viiden vuoden tarkastelussa ostovoima on vahvistunut.")
+        else:
+            parts.append("Viiden vuoden tarkastelussa ostovoima on ollut paineessa.")
+
+    if not parts:
+        return "Palkkakehityksen tulkintaa ei voitu muodostaa puuttuvien tietojen vuoksi."
+
+    return " ".join(parts)
+
 
 
 def render_index_explainer(
@@ -509,49 +712,118 @@ def render_gdp_section(
     private_consumption = None
     investments = None
 
-    if not comp_latest.empty:
-        pc = comp_latest[comp_latest["Komponentti"] == "Yksityinen kulutus"]
-        inv = comp_latest[comp_latest["Komponentti"] == "Investoinnit"]
+    private_consumption_delta = None
+    investments_delta = None
 
-        if not pc.empty:
-            private_consumption = float(pc.iloc[-1]["gdp_component_yoy"])
-        if not inv.empty:
-            investments = float(inv.iloc[-1]["gdp_component_yoy"])
+    if components_df is not None and not components_df.empty:
+
+        comp_df = components_df.copy()
+        comp_df["Date"] = pd.to_datetime(comp_df["Date"], errors="coerce")
+        comp_df["gdp_component_yoy"] = pd.to_numeric(
+            comp_df["gdp_component_yoy"],
+            errors="coerce",
+        )
+
+        # Yksityinen kulutus
+        pc_df = (
+            comp_df[comp_df["Komponentti"] == "Yksityinen kulutus"]
+            .dropna(subset=["Date", "gdp_component_yoy"])
+            .sort_values("Date")
+        )
+
+        if not pc_df.empty:
+            private_consumption = float(pc_df.iloc[-1]["gdp_component_yoy"])
+
+            if len(pc_df) > 4:
+                private_consumption_delta = (
+                    float(pc_df.iloc[-1]["gdp_component_yoy"])
+                    -  float(pc_df.iloc[-5]["gdp_component_yoy"])
+                )
+
+        # Investoinnit
+        inv_df = (
+            comp_df[comp_df["Komponentti"] == "Investoinnit"]
+            .dropna(subset=["Date", "gdp_component_yoy"])
+            .sort_values("Date")
+        )
+
+        if not inv_df.empty:
+            investments = float(inv_df.iloc[-1]["gdp_component_yoy"])
+
+            if len(inv_df) > 4:
+                investments_delta = (
+                    float(inv_df.iloc[-1]["gdp_component_yoy"])
+                    -  float(inv_df.iloc[-5]["gdp_component_yoy"])
+                )
+
+    gdp_icon, gdp_status = _gdp_status(g_last)
+    pc_icon, pc_status = _component_status(private_consumption, "Yksityinen kulutus")
+    inv_icon, inv_status = _component_status(investments, "Investoinnit")
 
     st.markdown("### 📌 Tilaindikaattorit")
 
     c1, c2, c3, c4 = st.columns(4, gap="large")
 
     with c1:
-        kpi_card(
-            "BKT YoY",
-            fmt(g_last, 2, " %"),
-            f"{g_delta_y:+.2f} %-yks. (1 v)" if g_delta_y is not None else None,
-            f"Kvartaali: {g_date}",
-        )
+        with st.container(border=True):
+            st.markdown(f"### {gdp_icon} BKT YoY")
+            st.markdown(f"**Tila:** {gdp_status}")
+            st.metric(
+                "Kasvuvauhti",
+                fmt(g_last, 2, " %"),
+                f"{g_delta_y:+.2f} %-yks. (1 v)" if g_delta_y is not None else None,
+            )
+            st.caption(f"Kvartaali: {g_date}")
 
     with c2:
-        kpi_card(
-            "BKT 4Q keskiarvo",
-            fmt(last_4q_avg, 2, " %"),
-            None,
-            "Viimeisten 4 neljänneksen keskimääräinen kasvuvauhti.",
-        )
+        with st.container(border=True):
+            avg_icon, avg_status = _gdp_status(last_4q_avg)
+            st.markdown(f"### {avg_icon} BKT 4Q keskiarvo")
+            st.markdown(f"**Tila:** {avg_status}")
+            st.metric("Keskiarvo", fmt(last_4q_avg, 2, " %"))
+            st.caption("Viimeisten 4 neljänneksen keskimääräinen kasvuvauhti.")
 
     with c3:
-        kpi_card(
-            "Yksityinen kulutus",
-            fmt(private_consumption, 2, " %"),
-            None,
-            "Viimeisin YoY-muutos.",
-        )
+        with st.container(border=True):
+            st.markdown(f"### {pc_icon} Yksityinen kulutus")
+            st.markdown(f"**Tila:** {pc_status}")
+            st.metric(
+                "YoY-muutos",
+                fmt(private_consumption, 2, " %"),
+                (
+                    f"{private_consumption_delta:+.2f} %-yks. (1 v)"
+                    if private_consumption_delta is not None
+                    else None
+                ),
+            )
+            st.caption("Muutos verrattuna vuoden takaiseen kasvuvauhtiin.")
 
     with c4:
-        kpi_card(
-            "Investoinnit",
-            fmt(investments, 2, " %"),
-            None,
-            "Viimeisin YoY-muutos.",
+        with st.container(border=True):
+            st.markdown(f"### {inv_icon} Investoinnit")
+            st.markdown(f"**Tila:** {inv_status}")
+            st.metric(
+                "YoY-muutos",
+                fmt(investments, 2, " %"),
+                (
+                    f"{investments_delta:+.2f} %-yks. (1 v)"
+                    if investments_delta is not None
+                    else None
+                ),
+            )
+            if investments is not None and investments < 0:
+                st.warning("Investoinnit ovat laskussa. Tämä voi heikentää tulevaa kasvupohjaa.")
+            else:
+                st.caption("Muutos verrattuna vuoden takaiseen kasvuvauhtiin.")
+
+    st.markdown("### 🧭 Mikä vetää taloutta juuri nyt?")
+    with st.container(border=True):
+        st.write(
+            _build_gdp_driver_text(
+                gdp_now=g_last,
+                private_consumption=private_consumption,
+                investments=investments,
+            )
         )
 
     if last_5y_avg is not None:
@@ -634,19 +906,25 @@ def render_gdp_section(
 
 
 def render_unemployment_section(df: pd.DataFrame, years: int) -> None:
-    st.subheader("🧑‍💼 Työttömyys (kuukausi)")
+    st.subheader("🧑‍💼 Työttömyys ja työmarkkina")
     st.caption(
         "Työttömyysaste (%) = työttömien osuus työvoimasta. "
-        "Kuukausikuvaajassa pylväät näyttävät kausitasoitetun sarjan ja viiva trendin."
+        "Kausitasoitettu sarja kertoo nykytilasta ja trendi näyttää pidemmän suunnan."
     )
 
     if df is None or df.empty:
         st.warning("Työttömyysdataa ei saatu.")
         return
 
-    d = clip_by_years(df, "Date", years)
+    d = clip_by_years(df, "Date", years).copy()
+    d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
+    d = d.dropna(subset=["Date"]).sort_values("Date")
 
-    latest_date = pd.to_datetime(d["Date"].dropna().iloc[-1]).date() if d["Date"].notna().any() else None
+    if d.empty:
+        st.warning("Työttömyysdata on tyhjä valitulla aikavälillä.")
+        return
+
+    latest_date = pd.to_datetime(d["Date"].iloc[-1]).date()
 
     latest_rate = (
         float(pd.to_numeric(d.get("unemployment_rate_sa"), errors="coerce").dropna().iloc[-1])
@@ -675,70 +953,146 @@ def render_unemployment_section(df: pd.DataFrame, years: int) -> None:
             if prev != 0:
                 level_delta_1y = (latest / prev - 1.0) * 100.0
 
-    c1, c2 = st.columns(2, gap="large")
+    trend_latest = None
+    trend_delta_1y = None
+
+    if "unemployment_rate_trend" in d.columns and d["unemployment_rate_trend"].notna().any():
+        trend_s = pd.to_numeric(d["unemployment_rate_trend"], errors="coerce").dropna()
+
+        if not trend_s.empty:
+            trend_latest = float(trend_s.iloc[-1])
+
+        if len(trend_s) > 12:
+            trend_delta_1y = float(trend_s.iloc[-1] - trend_s.iloc[-13])
+
+    rate_12m_avg = None
+    if "unemployment_rate_sa" in d.columns:
+        rate_s = pd.to_numeric(d["unemployment_rate_sa"], errors="coerce").dropna()
+        if len(rate_s) >= 12:
+            rate_12m_avg = float(rate_s.tail(12).mean())
+
+    rate_icon, rate_status = _unemployment_status(latest_rate)
+    trend_icon, trend_status = _unemployment_trend_status(rate_delta_1y)
+
+    st.markdown("### 📌 Tilaindikaattorit")
+
+    c1, c2, c3, c4 = st.columns(4, gap="large")
 
     with c1:
-        kpi_card(
-            "Työttömyysaste (%)",
-            fmt(latest_rate, 2, " %"),
-            f"{rate_delta_1y:+.2f} %-yks. (1 v)" if rate_delta_1y is not None else None,
-            f"Kuukausi: {latest_date}" if latest_date else None,
-        )
+        with st.container(border=True):
+            st.markdown(f"### {rate_icon} Työttömyysaste")
+            st.markdown(f"**Tila:** {rate_status}")
+            st.metric(
+                "Kausitasoitettu",
+                fmt(latest_rate, 2, " %"),
+                f"{rate_delta_1y:+.2f} %-yks. (1 v)" if rate_delta_1y is not None else None,
+            )
+            st.caption(f"Kuukausi: {latest_date}")
 
     with c2:
-        kpi_card(
-            "Työttömät (1000 hlö)",
-            fmt(latest_level, 0, ""),
-            f"{level_delta_1y:+.1f} % (1 v)" if level_delta_1y is not None else None,
-            f"Kuukausi: {latest_date}" if latest_date else None,
+        with st.container(border=True):
+            st.markdown("### 👥 Työttömät")
+            st.metric(
+                "1000 henkilöä",
+                fmt(latest_level, 0, ""),
+                f"{level_delta_1y:+.1f} % (1 v)" if level_delta_1y is not None else None,
+            )
+            st.caption(f"Kuukausi: {latest_date}")
+
+    with c3:
+        with st.container(border=True):
+            st.markdown(f"### {trend_icon} Suunta")
+            st.markdown(f"**Tila:** {trend_status}")
+            st.metric(
+                "Muutos vuodessa",
+                f"{rate_delta_1y:+.2f} %-yks." if rate_delta_1y is not None else "—",
+            )
+            st.caption("Työttömyysasteen muutos vuoden takaiseen.")
+
+    with c4:
+        with st.container(border=True):
+            avg_icon, avg_status = _unemployment_status(rate_12m_avg)
+            st.markdown(f"### {avg_icon} 12 kk keskiarvo")
+            st.markdown(f"**Tila:** {avg_status}")
+            st.metric("Keskiarvo", fmt(rate_12m_avg, 2, " %"))
+            st.caption("Viimeisten 12 kuukauden keskimääräinen työttömyysaste.")
+
+    if latest_rate is not None and latest_rate >= 9:
+        st.warning("Työttömyysaste on korkealla tasolla. Tämä voi painaa kotitalouksien kulutusta ja heikentää suhdannekuvaa.")
+
+    st.markdown("### 🧭 Tulkinta")
+    with st.container(border=True):
+        st.write(
+            _build_unemployment_text(
+                latest_rate=latest_rate,
+                rate_delta_1y=rate_delta_1y,
+                latest_level=latest_level,
+                level_delta_1y=level_delta_1y,
+            )
         )
 
     st.divider()
 
-    if "unemployment_rate_sa" in d.columns and d["unemployment_rate_sa"].notna().any():
-        dd = d.dropna(subset=["Date", "unemployment_rate_sa"]).copy()
+    tab_monthly, tab_yearly = st.tabs(["📊 Kuukausitaso", "📈 Vuositaso"])
 
-        fig = go.Figure()
-        fig.add_bar(x=dd["Date"], y=dd["unemployment_rate_sa"], name="Kausitasoitettu")
+    with tab_monthly:
+        if "unemployment_rate_sa" in d.columns and d["unemployment_rate_sa"].notna().any():
+            dd = d.dropna(subset=["Date", "unemployment_rate_sa"]).copy()
 
-        if "unemployment_rate_trend" in d.columns and d["unemployment_rate_trend"].notna().any():
-            dt = d.dropna(subset=["Date", "unemployment_rate_trend"]).copy()
-            fig.add_scatter(
-                x=dt["Date"],
-                y=dt["unemployment_rate_trend"],
-                mode="lines+markers",
-                name="Trendi",
+            fig = go.Figure()
+            fig.add_bar(
+                x=dd["Date"],
+                y=dd["unemployment_rate_sa"],
+                name="Kausitasoitettu",
             )
 
-        fig.update_layout(
-            title="Työttömyysaste (%) – kuukausitaso",
-            xaxis_title="Kuukausi",
-            yaxis_title="%",
-        )
-        fig.update_yaxes(ticksuffix=" %", zeroline=True)
-        st.plotly_chart(fig, width="stretch", key="macro_unemp_rate_combo")
+            if "unemployment_rate_trend" in d.columns and d["unemployment_rate_trend"].notna().any():
+                dt = d.dropna(subset=["Date", "unemployment_rate_trend"]).copy()
+                fig.add_scatter(
+                    x=dt["Date"],
+                    y=dt["unemployment_rate_trend"],
+                    mode="lines+markers",
+                    name="Trendi",
+                )
 
-        yearly_rate = _to_yearly_mean_df(dd, "Date", "unemployment_rate_sa")
-        if not yearly_rate.empty:
-            fig_year = px.line(
-                yearly_rate,
-                x="Vuosi",
-                y="unemployment_rate_sa",
-                markers=True,
-                title="Työttömyysaste (%) – vuositaso",
-                labels={"Vuosi": "Vuosi", "unemployment_rate_sa": "%"},
+            fig.update_layout(
+                title="Työttömyysaste (%) – kuukausitaso",
+                xaxis_title="Kuukausi",
+                yaxis_title="%",
+                hovermode="x unified",
             )
-            fig_year.update_yaxes(ticksuffix=" %", zeroline=True)
-            st.plotly_chart(fig_year, width="stretch", key="macro_unemp_rate_year_line")
-    else:
-        st.info("Työttömyysaste (%) ei löytynyt tästä aineistosta.")
+            fig.update_yaxes(ticksuffix=" %", zeroline=True)
+            st.plotly_chart(fig, width="stretch", key="macro_unemp_rate_combo")
+        else:
+            st.info("Työttömyysaste (%) ei löytynyt tästä aineistosta.")
+
+    with tab_yearly:
+        if "unemployment_rate_sa" in d.columns and d["unemployment_rate_sa"].notna().any():
+            dd = d.dropna(subset=["Date", "unemployment_rate_sa"]).copy()
+            yearly_rate = _to_yearly_mean_df(dd, "Date", "unemployment_rate_sa")
+
+            if not yearly_rate.empty:
+                fig_year = px.line(
+                    yearly_rate,
+                    x="Vuosi",
+                    y="unemployment_rate_sa",
+                    markers=True,
+                    title="Työttömyysaste (%) – vuositaso",
+                    labels={"Vuosi": "Vuosi", "unemployment_rate_sa": "%"},
+                )
+                fig_year.update_yaxes(ticksuffix=" %", zeroline=True)
+                st.plotly_chart(fig_year, width="stretch", key="macro_unemp_rate_year_line")
+            else:
+                st.info("Vuositason työttömyyssarjaa ei voitu muodostaa.")
+        else:
+            st.info("Työttömyysaste (%) ei löytynyt tästä aineistosta.")
 
 
 def render_wages_section(df: pd.DataFrame, years: int) -> None:
-    st.subheader("💶 Palkat")
+    st.subheader("💶 Palkat ja ostovoima")
     st.caption(
         "Palkat perustuvat Tilastokeskuksen ansiotasoindeksiin ja kokoaikaisten palkansaajien keskiansioihin. "
-        "Kuvaajat ovat neljännesvuositasolla."
+        "Reaaliansioindeksi kertoo, miten palkkojen ostovoima kehittyy inflaation jälkeen."
     )
 
     if df is None or df.empty:
@@ -763,12 +1117,10 @@ def render_wages_section(df: pd.DataFrame, years: int) -> None:
         if item not in ordered_sectors:
             ordered_sectors.append(item)
 
-    default_index = 0 if ordered_sectors else None
-
     selected_sector = st.selectbox(
         "Valitse sektori",
         ordered_sectors,
-        index=default_index,
+        index=0 if ordered_sectors else None,
         key="macro_wages_sector",
     )
 
@@ -805,34 +1157,88 @@ def render_wages_section(df: pd.DataFrame, years: int) -> None:
         else None
     )
 
-    c1, c2, c3 = st.columns(3, gap="large")
+    wage_5y = _pct_change_over_years(d, "Date", "wage_eur", 5)
+    index_5y = _pct_change_over_years(d, "Date", "wage_index", 5)
+    real_5y = _pct_change_over_years(d, "Date", "real_wage_index", 5)
+
+    power_icon, power_status = _wage_power_status(real_yoy)
+
+    st.markdown("### 📌 Tilaindikaattorit")
+
+    c1, c2, c3, c4 = st.columns(4, gap="large")
+
     with c1:
-        kpi_card(
-            "Keskimääräinen kuukausipalkka",
-            fmt(wage_now, 0, " €"),
-            f"{wage_yoy:+.1f} % (1 v)" if wage_yoy is not None else None,
-            f"Neljännes: {wage_date}" if wage_date else None,
-        )
+        with st.container(border=True):
+            st.markdown("### 💶 Kuukausipalkka")
+            st.metric(
+                "Keskimääräinen",
+                fmt(wage_now, 0, " €"),
+                f"{wage_yoy:+.1f} % (1 v)" if wage_yoy is not None else None,
+            )
+            st.caption(
+                f"5 v: {wage_5y:+.1f} % • Neljännes: {wage_date}"
+                if wage_5y is not None and wage_date
+                else f"Neljännes: {wage_date}" if wage_date else None
+            )
+
     with c2:
-        kpi_card(
-            "Ansiotasoindeksi",
-            fmt(index_now, 1),
-            f"{index_yoy:+.1f} % (1 v)" if index_yoy is not None else None,
-            f"Sektori: {selected_sector}",
-        )
+        with st.container(border=True):
+            st.markdown("### 📈 Ansiotaso")
+            st.metric(
+                "Indeksi",
+                fmt(index_now, 1),
+                f"{index_yoy:+.1f} % (1 v)" if index_yoy is not None else None,
+            )
+            st.caption(
+                f"5 v: {index_5y:+.1f} % • Sektori: {selected_sector}"
+                if index_5y is not None
+                else f"Sektori: {selected_sector}"
+            )
+
     with c3:
-        kpi_card(
-            "Reaaliansioindeksi",
-            fmt(real_now, 1),
-            f"{real_yoy:+.1f} % (1 v)" if real_yoy is not None else None,
-            f"Sektori: {selected_sector}",
+        with st.container(border=True):
+            st.markdown("### 🛒 Reaaliansiot")
+            st.metric(
+                "Indeksi",
+                fmt(real_now, 1),
+                f"{real_yoy:+.1f} % (1 v)" if real_yoy is not None else None,
+            )
+            st.caption(
+                f"5 v: {real_5y:+.1f} % • Inflaatio huomioitu"
+                if real_5y is not None
+                else "Inflaatio huomioitu"
+            )
+
+    with c4:
+        with st.container(border=True):
+            st.markdown(f"### {power_icon} Ostovoima")
+            st.markdown(f"**Tila:** {power_status}")
+            st.metric(
+                "Reaaliansioiden muutos",
+                f"{real_yoy:+.1f} %" if real_yoy is not None else "—",
+            )
+            if real_yoy is not None and real_yoy < -1:
+                st.warning("Ostovoima heikkenee, koska reaaliansiot laskevat.")
+            else:
+                st.caption("Perustuu reaaliansioiden vuosimuutokseen.")
+
+    st.markdown("### 🧭 Tulkinta")
+    with st.container(border=True):
+        st.write(
+            _build_wage_text(
+                wage_yoy=wage_yoy,
+                index_yoy=index_yoy,
+                real_yoy=real_yoy,
+                wage_5y=wage_5y,
+                real_5y=real_5y,
+            )
         )
 
     render_index_explainer("ℹ️ Mitä palkkaindeksi ja reaaliansioindeksi tarkoittavat?")
 
     st.divider()
 
-    tabs = st.tabs(["💶 Kuukausipalkka", "📈 Ansiotaso vs reaaliansiot"])
+    tabs = st.tabs(["💶 Kuukausipalkka", "📈 Ansiotaso vs reaaliansiot", "🛒 Ostovoima 5 v"])
 
     with tabs[0]:
         plot_df = d.dropna(subset=["Date", "wage_eur"]).copy()
@@ -885,8 +1291,29 @@ def render_wages_section(df: pd.DataFrame, years: int) -> None:
                 title=f"Ansiotasoindeksi ja reaaliansioindeksi – {selected_sector}",
                 xaxis_title="Neljännes",
                 yaxis_title="Indeksi",
+                hovermode="x unified",
             )
             st.plotly_chart(fig, width="stretch", key="macro_wages_index_compare_line")
+
+    with tabs[2]:
+        power_df = d.dropna(subset=["Date", "real_wage_index"]).copy()
+        power_df = clip_by_years(power_df, "Date", 5)
+
+        if power_df.empty:
+            st.info("Ostovoimakuvaajaa ei voitu muodostaa.")
+        else:
+            first = pd.to_numeric(power_df["real_wage_index"], errors="coerce").dropna().iloc[0]
+            power_df["Ostovoima_100"] = power_df["real_wage_index"] / first * 100.0
+
+            fig = px.line(
+                power_df,
+                x="Date",
+                y="Ostovoima_100",
+                markers=True,
+                title=f"Ostovoiman kehitys viimeisen 5 vuoden aikana – {selected_sector}",
+                labels={"Date": "Neljännes", "Ostovoima_100": "Indeksi, alku = 100"},
+            )
+            st.plotly_chart(fig, width="stretch", key="macro_wages_purchasing_power_5y")
 
 
 def render_trade_flow_section(cfg: dict, months: int) -> None:
