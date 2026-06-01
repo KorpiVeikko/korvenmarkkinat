@@ -607,6 +607,404 @@ def _build_wage_text(
     return " ".join(parts)
 
 
+def _trade_flow_status(pct: float | None) -> tuple[str, str]:
+    if pct is None or pd.isna(pct):
+        return "⚪", "Ei dataa"
+    if pct >= 5:
+        return "🟢", "Selvä kasvu"
+    if pct >= 0:
+        return "🟡", "Lievä kasvu"
+    if pct > -5:
+        return "🟠", "Lievä lasku"
+    return "🔴", "Selvä lasku"
+
+
+def _latest_full_year_group_stats(
+    df: pd.DataFrame,
+    date_col: str,
+    group_col: str,
+    value_col: str,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    d = df.copy()
+    d[date_col] = pd.to_datetime(d[date_col], errors="coerce")
+    d[value_col] = pd.to_numeric(d[value_col], errors="coerce")
+    d = d.dropna(subset=[date_col, group_col, value_col])
+
+    if d.empty:
+        return pd.DataFrame()
+
+    d["Vuosi"] = d[date_col].dt.year
+    d["Kuukausi"] = d[date_col].dt.month
+
+    counts = d.groupby("Vuosi")["Kuukausi"].nunique().reset_index(name="kk_lkm")
+    full_years = counts[counts["kk_lkm"] >= 12]["Vuosi"].tolist()
+
+    if not full_years:
+        return pd.DataFrame()
+
+    latest_year = max(full_years)
+    prev_year = latest_year - 1
+
+    yearly = (
+        d[d["Vuosi"].isin([latest_year, prev_year])]
+        .groupby(["Vuosi", group_col], as_index=False)[value_col]
+        .sum()
+    )
+
+    latest = yearly[yearly["Vuosi"] == latest_year][[group_col, value_col]].rename(
+        columns={value_col: "latest"}
+    )
+    prev = yearly[yearly["Vuosi"] == prev_year][[group_col, value_col]].rename(
+        columns={value_col: "prev"}
+    )
+
+    out = latest.merge(prev, on=group_col, how="left")
+    out["change_eur"] = out["latest"] - out["prev"]
+    out["change_pct"] = ((out["latest"] / out["prev"]) - 1.0) * 100.0
+    out.loc[out["prev"].isna() | (out["prev"] == 0), "change_pct"] = None
+    out["share_pct"] = out["latest"] / out["latest"].sum() * 100.0
+    out["Vuosi"] = latest_year
+
+    return out.sort_values("latest", ascending=False).reset_index(drop=True)
+
+
+def _trade_balance_status(balance_eur: float | None, change_eur: float | None) -> tuple[str, str]:
+    if balance_eur is None or pd.isna(balance_eur):
+        return "⚪", "Ei dataa"
+
+    if balance_eur >= 0 and (change_eur is None or change_eur >= 0):
+        return "🟢", "Ylijäämäinen / paranee"
+
+    if balance_eur >= 0 and change_eur is not None and change_eur < 0:
+        return "🟡", "Ylijäämäinen / heikkenee"
+
+    if balance_eur < 0 and change_eur is not None and change_eur >= 0:
+        return "🟡", "Alijäämäinen / paranee"
+
+    return "🔴", "Alijäämäinen / heikkenee"
+
+
+def _latest_full_year_trade_balance_stats(d: pd.DataFrame) -> dict:
+    if d is None or d.empty:
+        return {}
+
+    x = d.copy()
+    x["Aika_dt"] = pd.to_datetime(x["Aika_dt"], errors="coerce")
+
+    for col in ["Vienti_eur", "Tuonti_eur", "Kauppatase_eur"]:
+        x[col] = pd.to_numeric(x[col], errors="coerce")
+
+    x = x.dropna(subset=["Aika_dt", "Vienti_eur", "Tuonti_eur", "Kauppatase_eur"])
+    if x.empty:
+        return {}
+
+    x["Vuosi"] = x["Aika_dt"].dt.year
+    x["Kuukausi"] = x["Aika_dt"].dt.month
+
+    counts = x.groupby("Vuosi")["Kuukausi"].nunique().reset_index(name="kk_lkm")
+    full_years = counts[counts["kk_lkm"] >= 12]["Vuosi"].tolist()
+
+    if not full_years:
+        return {}
+
+    latest_year = max(full_years)
+    prev_year = latest_year - 1
+
+    yearly = (
+        x[x["Vuosi"].isin([latest_year, prev_year])]
+        .groupby("Vuosi", as_index=False)[["Vienti_eur", "Tuonti_eur", "Kauppatase_eur"]]
+        .sum()
+        .sort_values("Vuosi")
+    )
+
+    latest = yearly[yearly["Vuosi"] == latest_year]
+    if latest.empty:
+        return {}
+
+    latest_row = latest.iloc[0]
+
+    prev = yearly[yearly["Vuosi"] == prev_year]
+
+    balance_change = None
+    export_change = None
+    import_change = None
+
+    if not prev.empty:
+        prev_row = prev.iloc[0]
+        balance_change = float(latest_row["Kauppatase_eur"] - prev_row["Kauppatase_eur"])
+        export_change = float(latest_row["Vienti_eur"] - prev_row["Vienti_eur"])
+        import_change = float(latest_row["Tuonti_eur"] - prev_row["Tuonti_eur"])
+
+    export_import_ratio = None
+    if float(latest_row["Tuonti_eur"]) != 0:
+        export_import_ratio = float(latest_row["Vienti_eur"] / latest_row["Tuonti_eur"] * 100.0)
+
+    return {
+        "year": int(latest_year),
+        "exports": float(latest_row["Vienti_eur"]),
+        "imports": float(latest_row["Tuonti_eur"]),
+        "balance": float(latest_row["Kauppatase_eur"]),
+        "balance_change": balance_change,
+        "export_change": export_change,
+        "import_change": import_change,
+        "export_import_ratio": export_import_ratio,
+    }
+
+
+def _fmt_trade_change_eur(x: float | None) -> str | None:
+    if x is None or pd.isna(x):
+        return None
+
+    sign = "+" if x > 0 else ""
+    return f"{sign}{fmt_money(x)} (1 v)"
+
+
+def _trade_balance_text(stats: dict) -> str:
+    if not stats:
+        return "Kauppataseen tulkintaa ei voitu muodostaa puuttuvien tietojen vuoksi."
+
+    balance = stats.get("balance")
+    balance_change = stats.get("balance_change")
+    export_change = stats.get("export_change")
+    import_change = stats.get("import_change")
+
+    parts = []
+
+    if balance is not None:
+        if balance >= 0:
+            parts.append("Kauppatase on ylijäämäinen eli vienti ylittää tuonnin.")
+        else:
+            parts.append("Kauppatase on alijäämäinen eli tuonti ylittää viennin.")
+
+    if balance_change is not None:
+        if balance_change > 0:
+            parts.append("Kauppatase on parantunut vuodentakaiseen verrattuna.")
+        elif balance_change < 0:
+            parts.append("Kauppatase on heikentynyt vuodentakaiseen verrattuna.")
+        else:
+            parts.append("Kauppatase on lähes ennallaan vuodentakaiseen verrattuna.")
+
+    if export_change is not None and import_change is not None:
+        if export_change > 0 and import_change < 0:
+            parts.append("Tilannetta parantaa se, että vienti kasvaa ja tuonti pienenee.")
+        elif export_change < 0 and import_change > 0:
+            parts.append("Tilannetta heikentää se, että vienti pienenee ja tuonti kasvaa.")
+        elif export_change > import_change:
+            parts.append("Vienti kehittyy tuontia vahvemmin, mikä tukee kauppatasetta.")
+        elif import_change > export_change:
+            parts.append("Tuonti kehittyy vientiä vahvemmin, mikä painaa kauppatasetta.")
+
+    return " ".join(parts)
+
+
+def _trade_flow_text(
+    flow_name: str,
+    total_pct: float | None,
+    top_driver: str | None,
+    top_drag: str | None,
+) -> str:
+
+    if flow_name.lower().startswith("vien"):
+        subject = "Vienti"
+    elif flow_name.lower().startswith("tuon"):
+        subject = "Tuonti"
+    else:
+        subject = flow_name.capitalize()
+
+    parts = []
+
+    if total_pct is not None:
+        if total_pct >= 5:
+            parts.append(f"{subject} on selvässä kasvussa.")
+        elif total_pct >= 0:
+            parts.append(f"{subject} on lievässä kasvussa.")
+        elif total_pct > -5:
+            parts.append(f"{subject} on lievässä laskussa.")
+        else:
+            parts.append(f"{subject} on selvässä laskussa.")
+
+    if top_driver:
+        parts.append(f"Suurin positiivinen ajuri on {top_driver}.")
+
+    if top_drag:
+        parts.append(f"Suurin heikentäjä on {top_drag}.")
+
+    return " ".join(parts)
+
+
+def _debt_status(debt_pct: float | None, change_pct: float | None) -> tuple[str, str]:
+    if debt_pct is None or pd.isna(debt_pct):
+        return "⚪", "Ei dataa"
+
+    if debt_pct < 60:
+        return "🟢", "Maltillinen"
+
+    if debt_pct < 90:
+        if change_pct is not None and change_pct > 3:
+            return "🟠", "Koholla / kasvaa"
+        return "🟡", "Koholla"
+
+    if change_pct is not None and change_pct > 3:
+        return "🔴", "Korkea / kasvaa"
+
+    return "🟠", "Korkea"
+
+
+def _debt_direction_status(change_pct: float | None) -> tuple[str, str]:
+    if change_pct is None or pd.isna(change_pct):
+        return "⚪", "Ei dataa"
+
+    if change_pct < -1:
+        return "🟢", "Velkasuhde laskee"
+    if change_pct <= 1:
+        return "🟡", "Melko vakaa"
+    return "🔴", "Velkasuhde kasvaa"
+
+
+def _build_debt_text(
+    debt_pct: float | None,
+    pct_yoy: float | None,
+    debt_eur: float | None,
+    eur_yoy: float | None,
+) -> str:
+    parts = []
+
+    if debt_pct is not None:
+        if debt_pct < 60:
+            parts.append("Julkinen velka suhteessa BKT:hen on maltillisella tasolla.")
+        elif debt_pct < 90:
+            parts.append("Julkinen velka suhteessa BKT:hen on koholla.")
+        else:
+            parts.append("Julkinen velka suhteessa BKT:hen on korkealla tasolla.")
+
+    if pct_yoy is not None:
+        if pct_yoy > 3:
+            parts.append("Velkasuhde on kasvanut selvästi vuodessa, mikä heikentää julkisen talouden liikkumavaraa.")
+        elif pct_yoy > 0:
+            parts.append("Velkasuhde on noussut hieman vuodessa.")
+        elif pct_yoy < -1:
+            parts.append("Velkasuhde on laskenut, mikä tukee julkisen talouden kestävyyttä.")
+        else:
+            parts.append("Velkasuhde on pysynyt melko vakaana.")
+
+    if eur_yoy is not None:
+        if eur_yoy > 5:
+            parts.append("Euromääräinen velka kasvaa nopeasti.")
+        elif eur_yoy > 0:
+            parts.append("Euromääräinen velka kasvaa edelleen.")
+        elif eur_yoy < 0:
+            parts.append("Euromääräinen velka on laskenut.")
+
+    if not parts:
+        return "Velkatilanteen tulkintaa ei voitu muodostaa puuttuvien tietojen vuoksi."
+
+    return " ".join(parts)
+
+
+def _private_debt_status(value: float | None, kind: str = "general") -> tuple[str, str]:
+    if value is None or pd.isna(value):
+        return "⚪", "Ei dataa"
+
+    if kind == "household_gdi":
+        if value < 100:
+            return "🟢", "Maltillinen"
+        if value < 140:
+            return "🟡", "Koholla"
+        return "🔴", "Korkea"
+
+    if value < 80:
+        return "🟢", "Maltillinen"
+    if value < 120:
+        return "🟡", "Koholla"
+    return "🔴", "Korkea"
+
+
+def _debt_change_pp(
+    df: pd.DataFrame | None,
+    date_col: str,
+    value_col: str,
+    periods: int = 1,
+) -> float | None:
+    if df is None or df.empty or value_col not in df.columns:
+        return None
+
+    d = df.copy()
+    d[date_col] = pd.to_datetime(d[date_col], errors="coerce")
+    d[value_col] = pd.to_numeric(d[value_col], errors="coerce")
+    d = d.dropna(subset=[date_col, value_col]).sort_values(date_col)
+
+    if len(d) <= periods:
+        return None
+
+    return float(d.iloc[-1][value_col] - d.iloc[-(periods + 1)][value_col])
+
+
+def _private_debt_text(
+    hh_gdi: float | None,
+    hh_gdi_change: float | None,
+    nfc_gdp: float | None,
+    nfc_change: float | None,
+    private_gdp: float | None,
+    private_change: float | None,
+    hh_loans_yoy: float | None,
+    nfc_loans_yoy: float | None,
+) -> str:
+    parts = []
+
+    if hh_gdi is not None:
+        if hh_gdi >= 140:
+            parts.append("Kotitalouksien velka suhteessa tuloihin on korkealla tasolla.")
+        elif hh_gdi >= 100:
+            parts.append("Kotitalouksien velka suhteessa tuloihin on koholla.")
+        else:
+            parts.append("Kotitalouksien velka suhteessa tuloihin on maltillisella tasolla.")
+
+    if hh_gdi_change is not None:
+        if hh_gdi_change > 2:
+            parts.append("Kotitalouksien velkasuhde on noussut vuodessa.")
+        elif hh_gdi_change < -2:
+            parts.append("Kotitalouksien velkasuhde on laskenut vuodessa.")
+        else:
+            parts.append("Kotitalouksien velkasuhde on pysynyt melko vakaana.")
+
+    if nfc_gdp is not None:
+        if nfc_gdp >= 120:
+            parts.append("Yritysvelka suhteessa BKT:hen on korkealla tasolla.")
+        elif nfc_gdp >= 80:
+            parts.append("Yritysvelka suhteessa BKT:hen on koholla.")
+        else:
+            parts.append("Yritysvelka suhteessa BKT:hen on maltillisella tasolla.")
+
+    if private_gdp is not None and private_change is not None:
+        if private_change > 2:
+            parts.append("Yksityisen sektorin kokonaisvelka on noususuunnassa.")
+        elif private_change < -2:
+            parts.append("Yksityisen sektorin kokonaisvelka on laskusuunnassa.")
+
+    if hh_loans_yoy is not None:
+        if hh_loans_yoy > 5:
+            parts.append("Kotitalouksien lainakanta kasvaa nopeasti.")
+        elif hh_loans_yoy > 0:
+            parts.append("Kotitalouksien lainakanta kasvaa maltillisesti.")
+        elif hh_loans_yoy < 0:
+            parts.append("Kotitalouksien lainakanta supistuu.")
+
+    if nfc_loans_yoy is not None:
+        if nfc_loans_yoy > 5:
+            parts.append("Yritysten lainakanta kasvaa nopeasti.")
+        elif nfc_loans_yoy > 0:
+            parts.append("Yritysten lainakanta kasvaa maltillisesti.")
+        elif nfc_loans_yoy < 0:
+            parts.append("Yritysten lainakanta supistuu.")
+
+    if not parts:
+        return "Yksityisen velan tulkintaa ei voitu muodostaa puuttuvien tietojen vuoksi."
+
+    return " ".join(parts)
+
 
 def render_index_explainer(
     title: str = "ℹ️ Miten indeksejä luetaan?",
@@ -1323,14 +1721,86 @@ def render_trade_flow_section(cfg: dict, months: int) -> None:
     products_df, products_debug = cfg["fetch_products"](months=max(months, 84), lang="fi")
     total_df = build_total_flow_from_products(products_df, cfg["value_col"])
 
-    latest_val, pct_val, latest_year = _full_year_stats_from_mixed_series(total_df, "Aika_dt", cfg["value_col"])
-
-    kpi_card(
-        cfg["metric_label"],
-        fmt_money(latest_val),
-        f"{pct_val:+.1f} % (1 v)" if pct_val is not None else None,
-        f"Viimeisin täysi vuosi: {latest_year}" if latest_year is not None else None,
+    latest_val, pct_val, latest_year = _full_year_stats_from_mixed_series(
+        total_df,
+        "Aika_dt",
+        cfg["value_col"],
     )
+
+    icon, status = _trade_flow_status(pct_val)
+
+    product_stats = _latest_full_year_group_stats(
+        products_df,
+        date_col="Aika_dt",
+        group_col=cfg["group_col"],
+        value_col=cfg["value_col"],
+    )
+
+    top_product = None
+    top_product_share = None
+    top_driver = None
+    top_drag = None
+
+    if not product_stats.empty:
+        top_row = product_stats.sort_values("latest", ascending=False).iloc[0]
+        top_product = str(top_row[cfg["group_col"]])
+        top_product_share = float(top_row["share_pct"])
+
+        driver_df = product_stats.dropna(subset=["change_eur"]).sort_values("change_eur", ascending=False)
+        drag_df = product_stats.dropna(subset=["change_eur"]).sort_values("change_eur", ascending=True)
+
+        if not driver_df.empty and float(driver_df.iloc[0]["change_eur"]) > 0:
+            top_driver = str(driver_df.iloc[0][cfg["group_col"]])
+
+        if not drag_df.empty and float(drag_df.iloc[0]["change_eur"]) < 0:
+            top_drag = str(drag_df.iloc[0][cfg["group_col"]])
+
+    st.markdown("### 📌 Tilaindikaattorit")
+
+    c1, c2, c3, c4 = st.columns(4, gap="large")
+
+    with c1:
+        with st.container(border=True):
+            st.markdown(f"### {icon} {cfg['metric_label']}")
+            st.markdown(f"**Tila:** {status}")
+            st.metric(
+                "Viimeisin täysi vuosi",
+                fmt_money(latest_val),
+                f"{pct_val:+.1f} % (1 v)" if pct_val is not None else None,
+            )
+            st.caption(f"Vuosi: {latest_year}" if latest_year is not None else None)
+
+    with c2:
+        with st.container(border=True):
+            st.markdown("### 📦 Suurin tuoteryhmä")
+            st.metric(
+                top_product or "—",
+                f"{top_product_share:.1f} %" if top_product_share is not None else "—",
+            )
+            st.caption("Osuus viimeisimmästä täydestä vuodesta.")
+
+    with c3:
+        with st.container(border=True):
+            st.markdown("### 🟢 Suurin ajuri")
+            st.metric(top_driver or "—", "")
+            st.caption("Suurin positiivinen euromääräinen muutos vuodessa.")
+
+    with c4:
+        with st.container(border=True):
+            st.markdown("### 🔴 Suurin heikentäjä")
+            st.metric(top_drag or "—", "")
+            st.caption("Suurin negatiivinen euromääräinen muutos vuodessa.")
+
+    st.markdown("### 🧭 Tulkinta")
+    with st.container(border=True):
+        st.write(
+            _trade_flow_text(
+                flow_name=cfg["flow_name"],
+                total_pct=pct_val,
+                top_driver=top_driver,
+                top_drag=top_drag,
+            )
+        )
 
     st.divider()
 
@@ -1342,6 +1812,24 @@ def render_trade_flow_section(cfg: dict, months: int) -> None:
             st.warning(cfg["products_empty_msg"])
             show_debug_info(products_debug)
         else:
+            if not product_stats.empty:
+                with st.expander("📊 Tuoteryhmien viimeisin täysi vuosi", expanded=False):
+                    show_df = product_stats.copy()
+                    show_df["Arvo"] = show_df["latest"].apply(fmt_money)
+                    show_df["Muutos €"] = show_df["change_eur"].apply(fmt_money)
+                    show_df["Muutos %"] = show_df["change_pct"].map(
+                        lambda x: f"{x:+.1f} %" if pd.notna(x) else "—"
+                    )
+                    show_df["Osuus"] = show_df["share_pct"].map(
+                        lambda x: f"{x:.1f} %" if pd.notna(x) else "—"
+                    )
+
+                    st.dataframe(
+                        show_df[[cfg["group_col"], "Arvo", "Muutos €", "Muutos %", "Osuus"]],
+                        width="stretch",
+                        hide_index=True,
+                    )
+
             _stacked_bar_chart(
                 products_df,
                 date_col="Aika_dt",
@@ -1367,12 +1855,21 @@ def render_trade_flow_section(cfg: dict, months: int) -> None:
                 group_df, "Aika_dt", cfg["value_col"]
             )
 
-            kpi_card(
-                selected_group,
-                fmt_money(group_latest_val),
-                f"{group_pct_val:+.1f} % (1 v)" if group_pct_val is not None else None,
-                f"Viimeisin täysi vuosi: {group_latest_year}" if group_latest_year is not None else None,
-            )
+            group_icon, group_status = _trade_flow_status(group_pct_val)
+
+            with st.container(border=True):
+                st.markdown(f"### {group_icon} {selected_group}")
+                st.markdown(f"**Tila:** {group_status}")
+                st.metric(
+                    "Viimeisin täysi vuosi",
+                    fmt_money(group_latest_val),
+                    f"{group_pct_val:+.1f} % (1 v)" if group_pct_val is not None else None,
+                )
+                st.caption(
+                    f"Viimeisin täysi vuosi: {group_latest_year}"
+                    if group_latest_year is not None
+                    else None
+                )
 
             _combined_monthly_and_trend_chart(
                 group_df,
@@ -1388,6 +1885,31 @@ def render_trade_flow_section(cfg: dict, months: int) -> None:
             st.warning(cfg["regions_empty_msg"])
             show_debug_info(regions_debug)
         else:
+            region_stats = _latest_full_year_group_stats(
+                regions_df,
+                date_col="Aika_dt",
+                group_col=cfg["region_col"],
+                value_col=cfg["value_col"],
+            )
+
+            if not region_stats.empty:
+                with st.expander("🌍 Maanosien viimeisin täysi vuosi", expanded=False):
+                    show_df = region_stats.copy()
+                    show_df["Arvo"] = show_df["latest"].apply(fmt_money)
+                    show_df["Muutos €"] = show_df["change_eur"].apply(fmt_money)
+                    show_df["Muutos %"] = show_df["change_pct"].map(
+                        lambda x: f"{x:+.1f} %" if pd.notna(x) else "—"
+                    )
+                    show_df["Osuus"] = show_df["share_pct"].map(
+                        lambda x: f"{x:.1f} %" if pd.notna(x) else "—"
+                    )
+
+                    st.dataframe(
+                        show_df[[cfg["region_col"], "Arvo", "Muutos €", "Muutos %", "Osuus"]],
+                        width="stretch",
+                        hide_index=True,
+                    )
+
             _stacked_bar_chart(
                 regions_df,
                 date_col="Aika_dt",
@@ -1413,12 +1935,21 @@ def render_trade_flow_section(cfg: dict, months: int) -> None:
                 region_df, "Aika_dt", cfg["value_col"]
             )
 
-            kpi_card(
-                selected_region,
-                fmt_money(region_latest_val),
-                f"{region_pct_val:+.1f} % (1 v)" if region_pct_val is not None else None,
-                f"Viimeisin täysi vuosi: {region_latest_year}" if region_latest_year is not None else None,
-            )
+            region_icon, region_status = _trade_flow_status(region_pct_val)
+
+            with st.container(border=True):
+                st.markdown(f"### {region_icon} {selected_region}")
+                st.markdown(f"**Tila:** {region_status}")
+                st.metric(
+                    "Viimeisin täysi vuosi",
+                    fmt_money(region_latest_val),
+                    f"{region_pct_val:+.1f} % (1 v)" if region_pct_val is not None else None,
+                )
+                st.caption(
+                    f"Viimeisin täysi vuosi: {region_latest_year}"
+                    if region_latest_year is not None
+                    else None
+                )
 
             _combined_monthly_and_trend_chart(
                 region_df,
@@ -1429,10 +1960,9 @@ def render_trade_flow_section(cfg: dict, months: int) -> None:
                 key=f"{cfg['key']}_region_combined_line",
             )
 
-
 def render_trade_balance_section(exports_total_df: pd.DataFrame, imports_total_df: pd.DataFrame, years: int) -> None:
     st.subheader("⚖️ Kauppatase")
-    st.caption("Kauppatase = tavaravienti − tavaratuonti.")
+    st.caption("Kauppatase = tavaravienti − tavaratuonti. Positiivinen luku tarkoittaa ylijäämää, negatiivinen alijäämää.")
 
     trade_df = build_trade_balance(exports_total_df, imports_total_df)
     if trade_df is None or trade_df.empty:
@@ -1441,163 +1971,259 @@ def render_trade_balance_section(exports_total_df: pd.DataFrame, imports_total_d
 
     d = trade_df.copy()
     d["Aika_dt"] = pd.to_datetime(d["Aika_dt"], errors="coerce")
-    d["Kauppatase_eur"] = pd.to_numeric(d["Kauppatase_eur"], errors="coerce")
-    d = d.dropna(subset=["Aika_dt", "Kauppatase_eur"]).sort_values("Aika_dt")
+
+    for col in ["Vienti_eur", "Tuonti_eur", "Kauppatase_eur"]:
+        d[col] = pd.to_numeric(d[col], errors="coerce")
+
+    d = d.dropna(subset=["Aika_dt", "Vienti_eur", "Tuonti_eur", "Kauppatase_eur"]).sort_values("Aika_dt")
 
     if d.empty:
         st.warning("Kauppatasedataa ei saatu.")
         return
 
-    latest_val, pct_val, latest_year = _full_year_stats_from_mixed_series(d, "Aika_dt", "Kauppatase_eur")
+    stats = _latest_full_year_trade_balance_stats(d)
 
-    kpi_card(
-        "Kauppatase",
-        fmt_money(latest_val),
-        f"{pct_val:+.1f} % (1 v)" if pct_val is not None else None,
-        f"Viimeisin täysi vuosi: {latest_year}" if latest_year is not None else None,
-    )
+    balance = stats.get("balance")
+    balance_change = stats.get("balance_change")
+    exports = stats.get("exports")
+    imports = stats.get("imports")
+    export_import_ratio = stats.get("export_import_ratio")
+    latest_year = stats.get("year")
+
+    icon, status = _trade_balance_status(balance, balance_change)
+
+    st.markdown("### 📌 Tilaindikaattorit")
+
+    c1, c2, c3, c4 = st.columns(4, gap="large")
+
+    with c1:
+        with st.container(border=True):
+            st.markdown(f"### {icon} Kauppatase")
+            st.markdown(f"**Tila:** {status}")
+            st.metric(
+                "Viimeisin täysi vuosi",
+                fmt_money(balance),
+                _fmt_trade_change_eur(balance_change),
+            )
+            st.caption(f"Vuosi: {latest_year}" if latest_year is not None else None)
+
+    with c2:
+        with st.container(border=True):
+            st.markdown("### 🚢 Vienti")
+            st.metric("Arvo", fmt_money(exports))
+            st.caption("Viimeisin täysi vuosi.")
+
+    with c3:
+        with st.container(border=True):
+            st.markdown("### 📥 Tuonti")
+            st.metric("Arvo", fmt_money(imports))
+            st.caption("Viimeisin täysi vuosi.")
+
+    with c4:
+        with st.container(border=True):
+            ratio_icon = "🟢" if export_import_ratio is not None and export_import_ratio >= 100 else "🔴"
+            st.markdown(f"### {ratio_icon} Vienti / tuonti")
+            st.metric(
+                "Suhde",
+                f"{export_import_ratio:.1f} %" if export_import_ratio is not None else "—",
+            )
+            st.caption("Yli 100 % = vienti suurempi kuin tuonti.")
+
+    st.markdown("### 🧭 Tulkinta")
+    with st.container(border=True):
+        st.write(_trade_balance_text(stats))
 
     st.divider()
 
     plot_df = clip_by_years(d.copy(), "Aika_dt", years)
     plot_df["Kauppatase_milj_eur"] = plot_df["Kauppatase_eur"] / 1_000_000
 
-    fig_month = go.Figure()
-    fig_month.add_trace(
-        go.Scatter(
-            x=plot_df["Aika_dt"],
-            y=plot_df["Kauppatase_milj_eur"],
-            mode="lines+markers",
-            name="Kuukausisarja",
-            line=dict(width=2),
+    tab_month, tab_year, tab_compare = st.tabs(
+        ["📉 Kuukausisarja", "📈 Vuositaso", "🚢 Vienti vs tuonti"]
+    )
+
+    with tab_month:
+        fig_month = go.Figure()
+        fig_month.add_trace(
+            go.Scatter(
+                x=plot_df["Aika_dt"],
+                y=plot_df["Kauppatase_milj_eur"],
+                mode="lines+markers",
+                name="Kuukausisarja",
+                line=dict(width=2),
+            )
         )
-    )
-    fig_month.update_layout(
-        title="Kauppatase – kuukausisarja",
-        xaxis_title="Aika",
-        yaxis_title="Kauppatase (milj. €)",
-        hovermode="x unified",
-    )
-    _add_zero_line(fig_month)
-    st.plotly_chart(fig_month, width="stretch", key="macro_trade_balance_monthly_line")
-
-    yearly = _to_yearly_sum_df(d, "Aika_dt", "Kauppatase_eur")
-    if yearly is not None and not yearly.empty:
-        yearly = yearly.copy()
-        yearly["Kauppatase_milj_eur"] = pd.to_numeric(yearly["Kauppatase_eur"], errors="coerce") / 1_000_000
-        yearly["Vuosi_label"] = yearly["Vuosi"].astype(str)
-
-        fig_year = px.line(
-            yearly,
-            x="Vuosi_label",
-            y="Kauppatase_milj_eur",
-            markers=True,
-            title="Kauppatase – vuositaso",
-            labels={
-                "Vuosi_label": "Vuosi",
-                "Kauppatase_milj_eur": "Kauppatase (milj. €)",
-            },
+        fig_month.update_layout(
+            title="Kauppatase – kuukausisarja",
+            xaxis_title="Aika",
+            yaxis_title="Kauppatase (milj. €)",
+            hovermode="x unified",
         )
-        fig_year.update_xaxes(type="category")
-        _add_zero_line(fig_year)
-        st.plotly_chart(fig_year, width="stretch", key="macro_trade_balance_yearly_line")
-    else:
-        st.info("Vuositason kauppatasedataa ei saatu muodostettua.")
+        _add_zero_line(fig_month)
+        st.plotly_chart(fig_month, width="stretch", key="macro_trade_balance_monthly_line")
 
-    st.divider()
+    with tab_year:
+        yearly = _to_yearly_sum_df(d, "Aika_dt", "Kauppatase_eur")
+        if yearly is not None and not yearly.empty:
+            yearly = yearly.copy()
+            yearly["Kauppatase_milj_eur"] = pd.to_numeric(yearly["Kauppatase_eur"], errors="coerce") / 1_000_000
+            yearly["Vuosi_label"] = yearly["Vuosi"].astype(str)
 
-    compare_df = clip_by_years(d.copy(), "Aika_dt", years)
-    compare_df["Aika_label"] = compare_df["Aika_dt"].dt.strftime("%Y-%m")
-    compare_df["Vienti_milj_eur"] = pd.to_numeric(compare_df["Vienti_eur"], errors="coerce") / 1_000_000
-    compare_df["Tuonti_milj_eur"] = pd.to_numeric(compare_df["Tuonti_eur"], errors="coerce") / 1_000_000
+            fig_year = px.line(
+                yearly,
+                x="Vuosi_label",
+                y="Kauppatase_milj_eur",
+                markers=True,
+                title="Kauppatase – vuositaso",
+                labels={
+                    "Vuosi_label": "Vuosi",
+                    "Kauppatase_milj_eur": "Kauppatase (milj. €)",
+                },
+            )
+            fig_year.update_xaxes(type="category")
+            _add_zero_line(fig_year)
+            st.plotly_chart(fig_year, width="stretch", key="macro_trade_balance_yearly_line")
+        else:
+            st.info("Vuositason kauppatasedataa ei saatu muodostettua.")
 
-    fig_compare = go.Figure()
-    fig_compare.add_trace(
-        go.Scatter(
-            x=compare_df["Aika_label"],
-            y=compare_df["Vienti_milj_eur"],
-            mode="lines+markers",
-            name="Vienti",
+    with tab_compare:
+        compare_df = clip_by_years(d.copy(), "Aika_dt", years)
+        compare_df["Aika_label"] = compare_df["Aika_dt"].dt.strftime("%Y-%m")
+        compare_df["Vienti_milj_eur"] = pd.to_numeric(compare_df["Vienti_eur"], errors="coerce") / 1_000_000
+        compare_df["Tuonti_milj_eur"] = pd.to_numeric(compare_df["Tuonti_eur"], errors="coerce") / 1_000_000
+
+        fig_compare = go.Figure()
+        fig_compare.add_trace(
+            go.Scatter(
+                x=compare_df["Aika_dt"],
+                y=compare_df["Vienti_milj_eur"],
+                mode="lines+markers",
+                name="Vienti",
+            )
         )
-    )
-    fig_compare.add_trace(
-        go.Scatter(
-            x=compare_df["Aika_label"],
-            y=compare_df["Tuonti_milj_eur"],
-            mode="lines+markers",
-            name="Tuonti",
+        fig_compare.add_trace(
+            go.Scatter(
+                x=compare_df["Aika_dt"],
+                y=compare_df["Tuonti_milj_eur"],
+                mode="lines+markers",
+                name="Tuonti",
+            )
         )
-    )
-    fig_compare.update_layout(
-        title="Vienti ja tuonti samassa kuvaajassa",
-        xaxis_title="Aika",
-        yaxis_title="Arvo (milj. €)",
-    )
-    st.plotly_chart(fig_compare, width="stretch", key="macro_trade_compare_line")
+        fig_compare.update_layout(
+            title="Vienti ja tuonti samassa kuvaajassa",
+            xaxis_title="Aika",
+            yaxis_title="Arvo (milj. €)",
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig_compare, width="stretch", key="macro_trade_compare_line")
 
 
 def render_debt_section(debt_pct: pd.DataFrame, debt_eur: pd.DataFrame, years: int) -> None:
     st.subheader("🏦 Julkinen velka")
-    st.caption("Eurostat: bruttovelka (S13) kvartaaleittain sekä % BKT:stä että milj. euroina.")
+    st.caption(
+        "Eurostat: julkisyhteisöjen bruttovelka kvartaaleittain. "
+        "Velka/BKT kertoo velan suhteesta talouden kokoon."
+    )
 
     latest_pct = None
     latest_pct_date = None
     pct_yoy = None
+
     if debt_pct is not None and not debt_pct.empty and "debt_pct_gdp" in debt_pct.columns:
         x = debt_pct.copy()
         x["Date"] = pd.to_datetime(x["Date"], errors="coerce")
         x["debt_pct_gdp"] = pd.to_numeric(x["debt_pct_gdp"], errors="coerce")
         x = x.dropna(subset=["Date", "debt_pct_gdp"]).sort_values("Date")
+
         if not x.empty:
             latest_pct = float(x["debt_pct_gdp"].iloc[-1])
             latest_pct_date = pd.to_datetime(x["Date"].iloc[-1]).date()
 
-            prev_year_date = pd.to_datetime(x["Date"].iloc[-1]) - pd.DateOffset(years=1)
-            prev = x[x["Date"] == prev_year_date]
-            if not prev.empty:
-                prev_val = float(prev.iloc[-1]["debt_pct_gdp"])
-                if prev_val != 0:
-                    pct_yoy = ((latest_pct / prev_val) - 1.0) * 100.0
+            if len(x) > 4:
+                prev_val = float(x["debt_pct_gdp"].iloc[-5])
+                pct_yoy = latest_pct - prev_val
 
     latest_eur = None
     latest_eur_date = None
     eur_yoy = None
+
     if debt_eur is not None and not debt_eur.empty and "debt_mio_eur" in debt_eur.columns:
         y = debt_eur.copy()
         y["Date"] = pd.to_datetime(y["Date"], errors="coerce")
         y["debt_mio_eur"] = pd.to_numeric(y["debt_mio_eur"], errors="coerce")
         y = y.dropna(subset=["Date", "debt_mio_eur"]).sort_values("Date")
+
         if not y.empty:
             latest_eur = float(y["debt_mio_eur"].iloc[-1])
             latest_eur_date = pd.to_datetime(y["Date"].iloc[-1]).date()
 
-            prev_year_date = pd.to_datetime(y["Date"].iloc[-1]) - pd.DateOffset(years=1)
-            prev = y[y["Date"] == prev_year_date]
-            if not prev.empty:
-                prev_val = float(prev.iloc[-1]["debt_mio_eur"])
+            if len(y) > 4:
+                prev_val = float(y["debt_mio_eur"].iloc[-5])
                 if prev_val != 0:
                     eur_yoy = ((latest_eur / prev_val) - 1.0) * 100.0
 
-    c1, c2 = st.columns(2, gap="large")
+    debt_icon, debt_status = _debt_status(latest_pct, pct_yoy)
+    direction_icon, direction_status = _debt_direction_status(pct_yoy)
+
+    st.markdown("### 📌 Tilaindikaattorit")
+
+    c1, c2, c3 = st.columns(3, gap="large")
 
     with c1:
-        kpi_card(
-            "Velka / BKT",
-            f"{latest_pct:,.1f} %".replace(",", " ") if latest_pct is not None else "—",
-            f"{fmt_delta_pct(pct_yoy)} (1 v)" if pct_yoy is not None else None,
-            f"Lähde: Eurostat • {format_source_date(pd.to_datetime(latest_pct_date), 'year')}" if latest_pct_date else "Lähde: Eurostat",
-        )
+        with st.container(border=True):
+            st.markdown(f"### {debt_icon} Velka / BKT")
+            st.markdown(f"**Tila:** {debt_status}")
+            st.metric(
+                "Velkasuhde",
+                f"{latest_pct:,.1f} %".replace(",", " ") if latest_pct is not None else "—",
+                f"{pct_yoy:+.1f} %-yks. (1 v)" if pct_yoy is not None else None,
+            )
+            st.caption(
+                f"Lähde: Eurostat • {format_source_date(pd.to_datetime(latest_pct_date), 'year')}"
+                if latest_pct_date
+                else "Lähde: Eurostat"
+            )
 
     with c2:
-        debt_eur_text = "—"
-        if latest_eur is not None:
-            debt_eur_text = f"{latest_eur:,.0f} milj. €".replace(",", " ")
+        with st.container(border=True):
+            st.markdown("### 💶 Velka euroina")
+            debt_eur_text = "—"
+            if latest_eur is not None:
+                debt_eur_text = f"{latest_eur:,.0f} milj. €".replace(",", " ")
 
-        kpi_card(
-            "Velka (milj. €)",
-            debt_eur_text,
-            f"{fmt_delta_pct(eur_yoy)} (1 v)" if eur_yoy is not None else None,
-            f"Lähde: Eurostat • {format_source_date(pd.to_datetime(latest_eur_date), 'year')}" if latest_eur_date else "Lähde: Eurostat",
+            st.metric(
+                "Bruttovelka",
+                debt_eur_text,
+                f"{eur_yoy:+.1f} % (1 v)" if eur_yoy is not None else None,
+            )
+            st.caption(
+                f"Lähde: Eurostat • {format_source_date(pd.to_datetime(latest_eur_date), 'year')}"
+                if latest_eur_date
+                else "Lähde: Eurostat"
+            )
+
+    with c3:
+        with st.container(border=True):
+            st.markdown(f"### {direction_icon} Suunta")
+            st.markdown(f"**Tila:** {direction_status}")
+            st.metric(
+                "Velkasuhteen muutos",
+                f"{pct_yoy:+.1f} %-yks." if pct_yoy is not None else "—",
+            )
+            st.caption("Muutos verrattuna vuoden takaiseen kvartaaliin.")
+
+    if latest_pct is not None and latest_pct >= 90:
+        st.warning("Velka/BKT on korkealla tasolla. Tämä voi kaventaa julkisen talouden liikkumavaraa.")
+
+    st.markdown("### 🧭 Tulkinta")
+    with st.container(border=True):
+        st.write(
+            _build_debt_text(
+                debt_pct=latest_pct,
+                pct_yoy=pct_yoy,
+                debt_eur=latest_eur,
+                eur_yoy=eur_yoy,
+            )
         )
 
     st.divider()
@@ -1617,9 +2243,9 @@ def render_debt_section(debt_pct: pd.DataFrame, debt_eur: pd.DataFrame, years: i
         d2 = d2.dropna(subset=["Date", "debt_mio_eur"]).sort_values("Date")
         d2 = clip_by_years(d2, "Date", years)
 
-    cc1, cc2 = st.columns(2, gap="large")
+    tab_ratio, tab_eur = st.tabs(["📈 Velka / BKT", "💶 Velka euroina"])
 
-    with cc1:
+    with tab_ratio:
         if d1.empty:
             st.info("Velka/BKT -sarjaa ei saatu.")
         else:
@@ -1647,7 +2273,7 @@ def render_debt_section(debt_pct: pd.DataFrame, debt_eur: pd.DataFrame, years: i
                 fig_year.update_yaxes(ticksuffix=" %")
                 st.plotly_chart(fig_year, width="stretch", key="macro_debt_pct_year_line")
 
-    with cc2:
+    with tab_eur:
         if d2.empty:
             st.info("Velan euromäärää ei saatu.")
         else:
@@ -1670,6 +2296,8 @@ def render_debt_section(debt_pct: pd.DataFrame, debt_eur: pd.DataFrame, years: i
                 key="macro_debt_eur_year_line",
             )
 
+
+
 def render_private_debt_section(
     household_pct_gdp: pd.DataFrame,
     household_pct_gdi: pd.DataFrame,
@@ -1683,8 +2311,8 @@ def render_private_debt_section(
 ) -> None:
     st.subheader("🏠 Yksityinen velka")
     st.caption(
-        "Eurostatin private debt -aineistoa: kotitalouksien velka, yritysvelka, "
-        "yksityinen velka yhteensä sekä sektorikohtaiset lainakannat."
+        "Yksityinen velka kertoo kotitalouksien ja yritysten velkaantumisesta. "
+        "Kotitalouksille tulosuhde on usein BKT-suhdetta havainnollisempi."
     )
 
     hh_gdp_val, hh_gdp_date = _latest_value_and_date(household_pct_gdp, "Date", "household_debt_pct_gdp")
@@ -1692,43 +2320,100 @@ def render_private_debt_section(
     nfc_gdp_val, nfc_gdp_date = _latest_value_and_date(nfc_pct_gdp, "Date", "nfc_debt_pct_gdp")
     private_gdp_val, private_gdp_date = _latest_value_and_date(private_pct_gdp, "Date", "private_debt_pct_gdp")
 
-    hh_gdp_yoy = yoy_pct_change(household_pct_gdp, "Date", "household_debt_pct_gdp")
-    hh_gdi_yoy = yoy_pct_change(household_pct_gdi, "Date", "household_debt_pct_gdi")
-    nfc_gdp_yoy = yoy_pct_change(nfc_pct_gdp, "Date", "nfc_debt_pct_gdp")
-    private_gdp_yoy = yoy_pct_change(private_pct_gdp, "Date", "private_debt_pct_gdp")
+    hh_gdp_change = _debt_change_pp(household_pct_gdp, "Date", "household_debt_pct_gdp", periods=1)
+    hh_gdi_change = _debt_change_pp(household_pct_gdi, "Date", "household_debt_pct_gdi", periods=1)
+    nfc_gdp_change = _debt_change_pp(nfc_pct_gdp, "Date", "nfc_debt_pct_gdp", periods=1)
+    private_gdp_change = _debt_change_pp(private_pct_gdp, "Date", "private_debt_pct_gdp", periods=1)
+
+    hh_loans_latest, hh_loans_date = _latest_value_and_date(household_loans_mio, "Date", "household_loans_mio")
+    nfc_loans_latest, nfc_loans_date = _latest_value_and_date(nfc_loans_mio, "Date", "nfc_loans_mio_nac")
+
+    hh_loans_yoy = yoy_pct_change(household_loans_mio, "Date", "household_loans_mio")
+    nfc_loans_yoy = yoy_pct_change(nfc_loans_mio, "Date", "nfc_loans_mio_nac")
+
+    hh_icon, hh_status = _private_debt_status(hh_gdi_val, kind="household_gdi")
+    nfc_icon, nfc_status = _private_debt_status(nfc_gdp_val)
+    total_icon, total_status = _private_debt_status(private_gdp_val)
+
+    st.markdown("### 📌 Tilaindikaattorit")
 
     c1, c2, c3, c4 = st.columns(4, gap="large")
 
     with c1:
-        kpi_card(
-            "Kotitaloudet / BKT",
-            fmt(hh_gdp_val, 1, " %"),
-            f"{fmt_delta_pct(hh_gdp_yoy)} (1 v)" if hh_gdp_yoy is not None else None,
-            f"Lähde: Eurostat • {format_source_date(hh_gdp_date, 'year')}" if hh_gdp_date is not None else "Lähde: Eurostat",
-        )
+        with st.container(border=True):
+            st.markdown(f"### {hh_icon} Kotitaloudet / tulot")
+            st.markdown(f"**Tila:** {hh_status}")
+            st.metric(
+                "Velka suhteessa tuloihin",
+                fmt(hh_gdi_val, 1, " %"),
+                f"{hh_gdi_change:+.1f} %-yks. (1 v)" if hh_gdi_change is not None else None,
+            )
+            st.caption(
+                f"Lähde: Eurostat • {format_source_date(hh_gdi_date, 'year')}"
+                if hh_gdi_date is not None
+                else "Lähde: Eurostat"
+            )
 
     with c2:
-        kpi_card(
-            "Kotitaloudet / tulot",
-            fmt(hh_gdi_val, 1, " %"),
-            f"{fmt_delta_pct(hh_gdi_yoy)} (1 v)" if hh_gdi_yoy is not None else None,
-            f"Lähde: Eurostat • {format_source_date(hh_gdi_date, 'year')}" if hh_gdi_date is not None else "Lähde: Eurostat",
-        )
+        with st.container(border=True):
+            st.markdown(f"### {nfc_icon} Yritykset / BKT")
+            st.markdown(f"**Tila:** {nfc_status}")
+            st.metric(
+                "Velka suhteessa BKT:hen",
+                fmt(nfc_gdp_val, 1, " %"),
+                f"{nfc_gdp_change:+.1f} %-yks. (1 v)" if nfc_gdp_change is not None else None,
+            )
+            st.caption(
+                f"Lähde: Eurostat • {format_source_date(nfc_gdp_date, 'year')}"
+                if nfc_gdp_date is not None
+                else "Lähde: Eurostat"
+            )
 
     with c3:
-        kpi_card(
-            "Yritykset / BKT",
-            fmt(nfc_gdp_val, 1, " %"),
-            f"{fmt_delta_pct(nfc_gdp_yoy)} (1 v)" if nfc_gdp_yoy is not None else None,
-            f"Lähde: Eurostat • {format_source_date(nfc_gdp_date, 'year')}" if nfc_gdp_date is not None else "Lähde: Eurostat",
-        )
+        with st.container(border=True):
+            st.markdown(f"### {total_icon} Yksityinen / BKT")
+            st.markdown(f"**Tila:** {total_status}")
+            st.metric(
+                "Yksityinen velka",
+                fmt(private_gdp_val, 1, " %"),
+                f"{private_gdp_change:+.1f} %-yks. (1 v)" if private_gdp_change is not None else None,
+            )
+            st.caption(
+                f"Lähde: Eurostat • {format_source_date(private_gdp_date, 'year')}"
+                if private_gdp_date is not None
+                else "Lähde: Eurostat"
+            )
 
     with c4:
-        kpi_card(
-            "Yksityinen velka / BKT",
-            fmt(private_gdp_val, 1, " %"),
-            f"{fmt_delta_pct(private_gdp_yoy)} (1 v)" if private_gdp_yoy is not None else None,
-            f"Lähde: Eurostat • {format_source_date(private_gdp_date, 'year')}" if private_gdp_date is not None else "Lähde: Eurostat",
+        with st.container(border=True):
+            st.markdown("### 💶 Kotitalouslainat")
+            st.metric(
+                "Lainakanta",
+                _fmt_mio_eur(hh_loans_latest),
+                f"{hh_loans_yoy:+.1f} % (1 v)" if hh_loans_yoy is not None else None,
+            )
+            st.caption(
+                f"Lähde: ECB • {format_source_date(hh_loans_date, 'month')}"
+                if hh_loans_date is not None
+                else "Lähde: ECB"
+            )
+
+    if hh_gdi_val is not None and hh_gdi_val >= 140:
+        st.warning("Kotitalouksien velka suhteessa tuloihin on korkealla tasolla. Korkojen nousu voi rasittaa kotitalouksia nopeasti.")
+
+    st.markdown("### 🧭 Tulkinta")
+    with st.container(border=True):
+        st.write(
+            _private_debt_text(
+                hh_gdi=hh_gdi_val,
+                hh_gdi_change=hh_gdi_change,
+                nfc_gdp=nfc_gdp_val,
+                nfc_change=nfc_gdp_change,
+                private_gdp=private_gdp_val,
+                private_change=private_gdp_change,
+                hh_loans_yoy=hh_loans_yoy,
+                nfc_loans_yoy=nfc_loans_yoy,
+            )
         )
 
     st.divider()
@@ -1740,6 +2425,13 @@ def render_private_debt_section(
         d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
         d["Arvo"] = pd.to_numeric(d["household_debt_pct_gdp"], errors="coerce")
         d["Sarja"] = "Kotitaloudet / BKT"
+        ratio_frames.append(d[["Date", "Arvo", "Sarja"]])
+
+    if household_pct_gdi is not None and not household_pct_gdi.empty:
+        d = household_pct_gdi.copy()
+        d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
+        d["Arvo"] = pd.to_numeric(d["household_debt_pct_gdi"], errors="coerce")
+        d["Sarja"] = "Kotitaloudet / tulot"
         ratio_frames.append(d[["Date", "Arvo", "Sarja"]])
 
     if nfc_pct_gdp is not None and not nfc_pct_gdp.empty:
@@ -1756,88 +2448,71 @@ def render_private_debt_section(
         d["Sarja"] = "Yksityinen velka / BKT"
         ratio_frames.append(d[["Date", "Arvo", "Sarja"]])
 
-    if ratio_frames:
-        ratio_df = pd.concat(ratio_frames, ignore_index=True)
-        ratio_df = clip_by_years(ratio_df, "Date", years)
-        ratio_df = ratio_df.dropna(subset=["Date", "Arvo"]).sort_values("Date")
+    tab_ratios, tab_loans = st.tabs(["📈 Velkasuhteet", "💶 Lainakannat"])
 
-        if not ratio_df.empty:
-            fig_ratio = px.line(
-                ratio_df,
-                x="Date",
-                y="Arvo",
-                color="Sarja",
-                markers=True,
-                title="Yksityisen velan suhdeluvut",
-                labels={"Date": "Vuosi", "Arvo": "%", "Sarja": "Sarja"},
-            )
-            fig_ratio.update_yaxes(ticksuffix=" %")
-            st.plotly_chart(fig_ratio, width="stretch", key="macro_private_debt_ratio_line")
+    with tab_ratios:
+        if ratio_frames:
+            ratio_df = pd.concat(ratio_frames, ignore_index=True)
+            ratio_df = clip_by_years(ratio_df, "Date", years)
+            ratio_df = ratio_df.dropna(subset=["Date", "Arvo"]).sort_values("Date")
+
+            if not ratio_df.empty:
+                fig_ratio = px.line(
+                    ratio_df,
+                    x="Date",
+                    y="Arvo",
+                    color="Sarja",
+                    markers=True,
+                    title="Yksityisen velan suhdeluvut",
+                    labels={"Date": "Vuosi", "Arvo": "%", "Sarja": "Sarja"},
+                )
+                fig_ratio.update_yaxes(ticksuffix=" %")
+                fig_ratio.update_layout(hovermode="x unified")
+                st.plotly_chart(fig_ratio, width="stretch", key="macro_private_debt_ratio_line")
+            else:
+                st.info("Yksityisen velan suhdelukuja ei löytynyt.")
         else:
             st.info("Yksityisen velan suhdelukuja ei löytynyt.")
-    else:
-        st.info("Yksityisen velan suhdelukuja ei löytynyt.")
 
-    st.divider()
+    with tab_loans:
+        loan_frames = []
 
-    hh_loans_latest, hh_loans_date = _latest_value_and_date(household_loans_mio, "Date", "household_loans_mio")
-    nfc_loans_latest, nfc_loans_date = _latest_value_and_date(nfc_loans_mio, "Date", "nfc_loans_mio_nac")
+        if household_loans_mio is not None and not household_loans_mio.empty:
+            d = household_loans_mio.copy()
+            d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
+            d["Arvo"] = pd.to_numeric(d["household_loans_mio"], errors="coerce")
+            d["Sarja"] = "Kotitaloudet"
+            loan_frames.append(d[["Date", "Arvo", "Sarja"]])
 
-    hh_loans_yoy = yoy_pct_change(household_loans_mio, "Date", "household_loans_mio")
-    nfc_loans_yoy = yoy_pct_change(nfc_loans_mio, "Date", "nfc_loans_mio_nac")
+        if nfc_loans_mio is not None and not nfc_loans_mio.empty:
+            d = nfc_loans_mio.copy()
+            d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
+            d["Arvo"] = pd.to_numeric(d["nfc_loans_mio_nac"], errors="coerce")
+            d["Sarja"] = "Yritykset"
+            loan_frames.append(d[["Date", "Arvo", "Sarja"]])
 
-    lc1, lc2 = st.columns(2, gap="large")
-    with lc1:
-        kpi_card(
-            "Kotitalouksien lainakanta",
-            _fmt_mio_eur(hh_loans_latest),
-            fmt_delta_pct(hh_loans_yoy),
-            f"Lähde: ECB • {format_source_date(hh_loans_date, 'month')}" if hh_loans_date is not None else "Lähde: ECB",
-        )
-    with lc2:
-        kpi_card(
-            "Yritysten lainakanta",
-            _fmt_mio_eur(nfc_loans_latest),
-            fmt_delta_pct(nfc_loans_yoy),
-            f"Lähde: Eurostat • {format_source_date(nfc_loans_date, 'year')}" if nfc_loans_date is not None else "Lähde: Eurostat",
-        )
+        if loan_frames:
+            loan_df = pd.concat(loan_frames, ignore_index=True)
+            loan_df = clip_by_years(loan_df, "Date", years)
+            loan_df = loan_df.dropna(subset=["Date", "Arvo"]).sort_values("Date")
 
-    loan_frames = []
-
-    if household_loans_mio is not None and not household_loans_mio.empty:
-        d = household_loans_mio.copy()
-        d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
-        d["Arvo"] = pd.to_numeric(d["household_loans_mio"], errors="coerce")
-        d["Sarja"] = "Kotitaloudet"
-        loan_frames.append(d[["Date", "Arvo", "Sarja"]])
-
-    if nfc_loans_mio is not None and not nfc_loans_mio.empty:
-        d = nfc_loans_mio.copy()
-        d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
-        d["Arvo"] = pd.to_numeric(d["nfc_loans_mio_nac"], errors="coerce")
-        d["Sarja"] = "Yritykset"
-        loan_frames.append(d[["Date", "Arvo", "Sarja"]])
-
-    if loan_frames:
-        loan_df = pd.concat(loan_frames, ignore_index=True)
-        loan_df = clip_by_years(loan_df, "Date", years)
-        loan_df = loan_df.dropna(subset=["Date", "Arvo"]).sort_values("Date")
-
-        if not loan_df.empty:
-            fig_loans = px.line(
-                loan_df,
-                x="Date",
-                y="Arvo",
-                color="Sarja",
-                markers=True,
-                title="Lainakannat sektoreittain",
-                labels={"Date": "Vuosi", "Arvo": "milj. €", "Sarja": "Sarja"},
-            )
-            st.plotly_chart(fig_loans, width="stretch", key="macro_private_loans_line")
+            if not loan_df.empty:
+                fig_loans = px.line(
+                    loan_df,
+                    x="Date",
+                    y="Arvo",
+                    color="Sarja",
+                    markers=True,
+                    title="Lainakannat sektoreittain",
+                    labels={"Date": "Vuosi", "Arvo": "milj. €", "Sarja": "Sarja"},
+                )
+                fig_loans.update_layout(hovermode="x unified")
+                st.plotly_chart(fig_loans, width="stretch", key="macro_private_loans_line")
+            else:
+                st.info("Lainakantadataa ei löytynyt.")
         else:
             st.info("Lainakantadataa ei löytynyt.")
-    else:
-        st.info("Lainakantadataa ei löytynyt.")
+            
 
 
 def _inflation_status(value: float | None) -> tuple[str, str]:
