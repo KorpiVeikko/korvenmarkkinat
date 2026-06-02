@@ -32,6 +32,7 @@ from services.macro_view_helpers import (
     render_trade_flow_section,
     render_unemployment_section,
     render_wages_section,
+    render_interest_section,
 )
 from services.macro_analysis_view import render_macro_analysis
 from services.macro_inflation_pressure import load_inflation_pressure_bundle
@@ -58,6 +59,7 @@ def render() -> None:
         "📥 Tuonti",
         "⚖️ Kauppatase",
         "🏦 Velka",
+        "💳 Korot",
         "🧠 Analyysi",
     ]
 
@@ -134,6 +136,11 @@ def render() -> None:
                 nfc_loans_debug=None,
                 years=YEARS,
             )
+
+    elif section == "💳 Korot":
+        euribor_12m, _ = load_euribor_12m()
+        infl = load_inflation()
+        render_interest_section(euribor_12m, infl, YEARS)
 
     elif section == "🧠 Analyysi":
         infl = load_inflation()

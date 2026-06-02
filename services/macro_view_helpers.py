@@ -1006,6 +1006,78 @@ def _private_debt_text(
     return " ".join(parts)
 
 
+def _interest_status(rate: float | None) -> tuple[str, str]:
+    if rate is None or pd.isna(rate):
+        return "⚪", "Ei dataa"
+
+    if rate < 1.5:
+        return "🟢", "Kevyt korkoympäristö"
+    if rate < 3.5:
+        return "🟡", "Koholla"
+    return "🔴", "Kireä korkoympäristö"
+
+
+def _interest_direction_status(change_pp: float | None) -> tuple[str, str]:
+    if change_pp is None or pd.isna(change_pp):
+        return "⚪", "Ei dataa"
+
+    if change_pp <= -0.5:
+        return "🟢", "Korot laskevat"
+    if change_pp < 0.5:
+        return "🟡", "Melko vakaa"
+    return "🔴", "Korot nousevat"
+
+
+def _annuity_payment(principal: float, annual_rate_pct: float, years: int) -> float | None:
+    if principal <= 0 or years <= 0 or annual_rate_pct is None or pd.isna(annual_rate_pct):
+        return None
+
+    months = years * 12
+    monthly_rate = annual_rate_pct / 100.0 / 12.0
+
+    if monthly_rate == 0:
+        return principal / months
+
+    return principal * monthly_rate / (1.0 - (1.0 + monthly_rate) ** (-months))
+
+
+def _build_interest_text(
+    euribor_now: float | None,
+    euribor_change: float | None,
+    real_rate: float | None,
+) -> str:
+    parts = []
+
+    if euribor_now is not None:
+        if euribor_now >= 3.5:
+            parts.append("12 kk Euribor on korkealla tasolla, mikä kiristää kotitalouksien ja yritysten rahoitusehtoja.")
+        elif euribor_now >= 1.5:
+            parts.append("12 kk Euribor on koholla, mutta ei enää erittäin kireällä tasolla.")
+        else:
+            parts.append("12 kk Euribor on matala, mikä tukee velallisia ja investointeja.")
+
+    if euribor_change is not None:
+        if euribor_change <= -0.5:
+            parts.append("Korkotaso on laskenut vuoden aikana, mikä helpottaa vaihtuvakorkoisten lainojen rasitusta.")
+        elif euribor_change >= 0.5:
+            parts.append("Korkotaso on noussut vuoden aikana, mikä lisää velallisten korkopainetta.")
+        else:
+            parts.append("Korkotaso on pysynyt melko vakaana vuoden takaiseen verrattuna.")
+
+    if real_rate is not None:
+        if real_rate > 1:
+            parts.append("Reaalikorko on positiivinen, eli korkotaso on inflaatioon nähden kiristävä.")
+        elif real_rate < -1:
+            parts.append("Reaalikorko on negatiivinen, eli inflaatio syö korkotason reaalista vaikutusta.")
+        else:
+            parts.append("Reaalikorko on lähellä nollaa, joten korkotaso on inflaatioon nähden neutraalimpi.")
+
+    if not parts:
+        return "Korkotilanteen tulkintaa ei voitu muodostaa puuttuvien tietojen vuoksi."
+
+    return " ".join(parts)
+
+
 def render_index_explainer(
     title: str = "ℹ️ Miten indeksejä luetaan?",
     include_real: bool = True,
@@ -2663,3 +2735,176 @@ def render_inflation_pressure_section(bundle: dict) -> None:
 
     fig.update_layout(hovermode="x unified")
     st.plotly_chart(fig, width="stretch")
+
+
+
+def render_interest_section(
+    euribor_df: pd.DataFrame,
+    inflation_df: pd.DataFrame | None,
+    years: int,
+) -> None:
+    st.subheader("🏦 Korot")
+    st.caption(
+        "Korkonäkymässä seurataan 12 kk Euriboria, korkosuunnan muutosta ja reaalikorkoa. "
+        "Reaalikorko = Euribor − inflaatio."
+    )
+
+    if euribor_df is None or euribor_df.empty:
+        st.warning("Korkodataa ei saatu.")
+        return
+
+    d = euribor_df.copy()
+    d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
+    d["euribor_12m"] = pd.to_numeric(d["euribor_12m"], errors="coerce")
+    d = d.dropna(subset=["Date", "euribor_12m"]).sort_values("Date")
+
+    if d.empty:
+        st.warning("Korkodataa ei saatu.")
+        return
+
+    latest_rate = float(d["euribor_12m"].iloc[-1])
+    latest_date = pd.to_datetime(d["Date"].iloc[-1]).date()
+
+    euribor_change = None
+    if len(d) > 12:
+        euribor_change = float(d["euribor_12m"].iloc[-1] - d["euribor_12m"].iloc[-13])
+
+    inflation_now = None
+    if inflation_df is not None and not inflation_df.empty and "inflation_yoy" in inflation_df.columns:
+        inf = inflation_df.copy()
+        inf["Date"] = pd.to_datetime(inf["Date"], errors="coerce")
+        inf["inflation_yoy"] = pd.to_numeric(inf["inflation_yoy"], errors="coerce")
+        inf = inf.dropna(subset=["Date", "inflation_yoy"]).sort_values("Date")
+        if not inf.empty:
+            inflation_now = float(inf["inflation_yoy"].iloc[-1])
+
+    real_rate = latest_rate - inflation_now if inflation_now is not None else None
+
+    status_icon, status_text = _interest_status(latest_rate)
+    direction_icon, direction_text = _interest_direction_status(euribor_change)
+
+    example_margin = 0.7
+    loan_rate = latest_rate + example_margin
+    payment_now = _annuity_payment(200_000, loan_rate, 25)
+
+    payment_prev = None
+    if len(d) > 12:
+        prev_rate = float(d["euribor_12m"].iloc[-13]) + example_margin
+        payment_prev = _annuity_payment(200_000, prev_rate, 25)
+
+    payment_change = (
+        payment_now - payment_prev
+        if payment_now is not None and payment_prev is not None
+        else None
+    )
+
+    st.markdown("### 📌 Tilaindikaattorit")
+
+    c1, c2, c3, c4 = st.columns(4, gap="large")
+
+    with c1:
+        with st.container(border=True):
+            st.markdown(f"### {status_icon} Euribor 12 kk")
+            st.markdown(f"**Tila:** {status_text}")
+            st.metric(
+                "Korko",
+                fmt(latest_rate, 2, " %"),
+                f"{euribor_change:+.2f} %-yks. (1 v)" if euribor_change is not None else None,
+            )
+            st.caption(f"Viimeisin havainto: {latest_date}")
+
+    with c2:
+        with st.container(border=True):
+            st.markdown(f"### {direction_icon} Korkosuunta")
+            st.markdown(f"**Tila:** {direction_text}")
+            st.metric(
+                "Muutos vuodessa",
+                f"{euribor_change:+.2f} %-yks." if euribor_change is not None else "—",
+            )
+            st.caption("12 kk Euriborin muutos vuoden takaiseen.")
+
+    with c3:
+        with st.container(border=True):
+            real_icon = "🔴" if real_rate is not None and real_rate > 1 else "🟡" if real_rate is not None and real_rate > -1 else "🟢"
+            st.markdown(f"### {real_icon} Reaalikorko")
+            st.metric(
+                "Euribor − inflaatio",
+                fmt(real_rate, 2, " %"),
+            )
+            st.caption(
+                f"Euribor {fmt(latest_rate, 2, ' %')} • inflaatio {fmt(inflation_now, 1, ' %')}"
+            )
+
+    with c4:
+        with st.container(border=True):
+            st.markdown("### 🏠 Esimerkkilaina")
+            st.metric(
+                "200 000 €, 25 v",
+                f"{payment_now:,.0f} €/kk".replace(",", " ") if payment_now is not None else "—",
+                f"{payment_change:+.0f} €/kk (1 v)" if payment_change is not None else None,
+            )
+            st.caption(f"Oletus: Euribor 12 kk + {example_margin:.1f} %-yks. marginaali.")
+
+    st.markdown("### 🧭 Tulkinta")
+    with st.container(border=True):
+        st.write(
+            _build_interest_text(
+                euribor_now=latest_rate,
+                euribor_change=euribor_change,
+                real_rate=real_rate,
+            )
+        )
+
+    st.divider()
+
+    plot_df = clip_by_years(d.copy(), "Date", years)
+
+    tab_euribor, tab_real = st.tabs(["📈 Euribor 12 kk", "📊 Reaalikorko"])
+
+    with tab_euribor:
+        fig = px.line(
+            plot_df,
+            x="Date",
+            y="euribor_12m",
+            markers=True,
+            title="12 kk Euribor",
+            labels={"Date": "Aika", "euribor_12m": "%"},
+        )
+        fig.update_yaxes(ticksuffix=" %", zeroline=True)
+        fig.update_layout(hovermode="x unified")
+        st.plotly_chart(fig, width="stretch", key="macro_interest_euribor_line")
+
+    with tab_real:
+        if inflation_df is None or inflation_df.empty:
+            st.info("Reaalikorkoa ei voitu laskea, koska inflaatiodataa ei saatu.")
+        else:
+            inf = inflation_df.copy()
+            inf["Date"] = pd.to_datetime(inf["Date"], errors="coerce")
+            inf["inflation_yoy"] = pd.to_numeric(inf["inflation_yoy"], errors="coerce")
+            inf = inf.dropna(subset=["Date", "inflation_yoy"]).sort_values("Date")
+
+            merged = pd.merge_asof(
+                d.sort_values("Date"),
+                inf[["Date", "inflation_yoy"]].sort_values("Date"),
+                on="Date",
+                direction="backward",
+            )
+
+            merged["real_rate"] = merged["euribor_12m"] - merged["inflation_yoy"]
+            merged = clip_by_years(merged, "Date", years)
+
+            if merged.empty:
+                st.info("Reaalikorkokuvaajaa ei voitu muodostaa.")
+            else:
+                fig_real = px.line(
+                    merged,
+                    x="Date",
+                    y="real_rate",
+                    markers=True,
+                    title="Reaalikorko: 12 kk Euribor − inflaatio",
+                    labels={"Date": "Aika", "real_rate": "%"},
+                )
+                fig_real.update_yaxes(ticksuffix=" %", zeroline=True)
+                _add_zero_line(fig_real)
+                fig_real.update_layout(hovermode="x unified")
+                st.plotly_chart(fig_real, width="stretch", key="macro_interest_real_rate_line")
