@@ -256,10 +256,20 @@ def _build_lists(indicators: list[dict]) -> tuple[list[str], list[str], list[str
 
         if change is not None:
             good_change = change >= 0 if positive_good else change <= 0
-            if good_change:
-                strengths.append(f"{name}: vuosimuutos tukee näkymää ({change:+.1f} %).")
+
+            if item.get("change_label") == "muutos 1 v":
+                change_txt = fmt_money(change)
+                if change > 0:
+                    change_txt = f"+{change_txt}"
+            elif "%-yks." in item.get("change_label", ""):
+                change_txt = f"{change:+.1f} %-yks."
             else:
-                risks.append(f"{name}: vuosimuutos heikentää kuvaa ({change:+.1f} %).")
+                change_txt = f"{change:+.1f} %"
+
+            if good_change:
+                strengths.append(f"{name}: vuosimuutos tukee näkymää ({change_txt}).")
+            else:
+                risks.append(f"{name}: vuosimuutos heikentää kuvaa ({change_txt}).")
 
     if not strengths:
         strengths.append("Selviä vahvuuksia ei erottunut nykyisestä datasta.")
@@ -347,6 +357,55 @@ def _household_status(
     return "🟡", "Paineessa", score
 
 
+def _latest_full_year_trade_stats(df: pd.DataFrame) -> dict:
+    if df is None or df.empty or "Aika_dt" not in df.columns or "Kauppatase_eur" not in df.columns:
+        return {}
+
+    d = df.copy()
+    d["Aika_dt"] = pd.to_datetime(d["Aika_dt"], errors="coerce")
+    d["Kauppatase_eur"] = pd.to_numeric(d["Kauppatase_eur"], errors="coerce")
+    d = d.dropna(subset=["Aika_dt", "Kauppatase_eur"]).sort_values("Aika_dt")
+
+    if d.empty:
+        return {}
+
+    d["Vuosi"] = d["Aika_dt"].dt.year
+    d["Kuukausi"] = d["Aika_dt"].dt.month
+
+    counts = d.groupby("Vuosi")["Kuukausi"].nunique().reset_index(name="kk_lkm")
+    full_years = counts[counts["kk_lkm"] >= 12]["Vuosi"].tolist()
+
+    if not full_years:
+        return {}
+
+    latest_year = max(full_years)
+    prev_year = latest_year - 1
+
+    yearly = (
+        d[d["Vuosi"].isin([latest_year, prev_year])]
+        .groupby("Vuosi", as_index=False)["Kauppatase_eur"]
+        .sum()
+        .sort_values("Vuosi")
+    )
+
+    latest_row = yearly[yearly["Vuosi"] == latest_year]
+    if latest_row.empty:
+        return {}
+
+    latest_val = float(latest_row.iloc[0]["Kauppatase_eur"])
+
+    change = None
+    prev_row = yearly[yearly["Vuosi"] == prev_year]
+    if not prev_row.empty:
+        prev_val = float(prev_row.iloc[0]["Kauppatase_eur"])
+        change = latest_val - prev_val
+
+    return {
+        "year": latest_year,
+        "value": latest_val,
+        "change": change,
+    }
+
 
 def render_macro_analysis(
     inflation_df: pd.DataFrame,
@@ -365,7 +424,12 @@ def render_macro_analysis(
     gdp_now = _latest(gdp_df, "gdp_yoy")
     unemployment_now = _latest(unemployment_df, "unemployment_rate_sa")
     debt_now = _latest(debt_df, "debt_pct_gdp")
-    trade_now = _latest(trade_balance_df, "Kauppatase_eur")
+    
+    trade_stats = _latest_full_year_trade_stats(trade_balance_df)
+    trade_now = trade_stats.get("value")
+    trade_change = trade_stats.get("change")
+    trade_year = trade_stats.get("year")
+
     household_debt_now = _latest(household_debt_df, "household_debt_pct_gdi")
     euribor_now = _latest(interest_df, "euribor_12m")
     euribor_change = _delta_points(interest_df, "euribor_12m", periods=12)
@@ -390,22 +454,7 @@ def render_macro_analysis(
     unemployment_change = _delta_points(unemployment_df, "unemployment_rate_sa", periods=12)
     debt_change = _pct_change(debt_df, "debt_pct_gdp", periods=1)
 
-    trade_change = None
-    trade_change_good = None
-
-    if trade_balance_df is not None and not trade_balance_df.empty and "Kauppatase_eur" in trade_balance_df.columns:
-        trade_series = pd.to_numeric(trade_balance_df["Kauppatase_eur"], errors="coerce").dropna()
-
-        if len(trade_series) > 12:
-            latest_trade = float(trade_series.iloc[-1])
-            prev_trade = float(trade_series.iloc[-13])
-
-            # Kauppataseessa absoluuttinen euromääräinen muutos on selkeämpi kuin prosentti.
-                # Positiivinen muutos = kauppatase paranee.
-            # Negatiivinen muutos = kauppatase heikkenee.
-            trade_change = latest_trade - prev_trade
-            trade_change_good = trade_change >= 0
-
+    
     score, state_icon, state_label = _macro_state_score(
         inflation_now=inflation_now,
         gdp_now=gdp_now,
@@ -491,7 +540,7 @@ def render_macro_analysis(
             "positive_good": True,
             "icon": _status_from_metric("Kauppatase", trade_now)[0],
             "status": _status_from_metric("Kauppatase", trade_now)[1],
-            "caption": f"Viimeisin havainto: {_latest_trade_date(trade_balance_df)}",
+            "caption": f"Viimeisin täysi vuosi: {trade_year}" if trade_year else "",
         },
         {
             "name": "Korkopaine",
