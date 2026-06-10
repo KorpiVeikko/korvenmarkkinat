@@ -6,22 +6,46 @@ import streamlit as st
 from pyjstat import pyjstat
 
 
-CPI_TOTAL_YOY_URL = "https://pxdata.stat.fi/PXWeb/api/v1/fi/StatFin/khi/statfin_khi_pxt_122p.px"
-CPI_INDEX_URL = "https://pxdata.stat.fi/PXWeb/api/v1/fi/StatFin/khi/statfin_khi_pxt_15b5.px"
+CPI_INDEX_URLS = [
+    # todennäköisin API-polku
+    "https://pxdata.stat.fi/PxWeb/api/v1/fi/StatFin/khi/15b5.px",
 
+    # sama eri kirjainkoolla
+    "https://pxdata.stat.fi/PXWeb/api/v1/fi/StatFin/khi/15b5.px",
 
-def _px_get_metadata(url: str) -> list[dict]:
-    r = requests.get(url, timeout=30)
+    # selainpolkua vastaava fallback
+    "https://pxdata.stat.fi/PxWeb/api/v1/fi/StatFin/StatFin__khi/15b5.px",
 
-    if r.status_code != 200:
-        raise RuntimeError(
-            f"Metadata-haku epäonnistui: {url}\n"
-            f"Status: {r.status_code}\n"
-            f"Response: {r.text}"
-        )
+    # pxweb2 fallback
+    "https://pxweb2.stat.fi/PxWeb/api/v1/fi/StatFin/StatFin__khi/15b5.px",
 
-    meta = r.json()
-    return meta if isinstance(meta, list) else meta.get("variables", [])
+    # vanha nimimuoto fallbackiksi
+    "https://pxdata.stat.fi/PxWeb/api/v1/fi/StatFin/StatFin__khi/statfin_khi_pxt_15b5.px",
+]
+
+def _px_get_metadata() -> tuple[list[dict], str]:
+    errors = []
+
+    for url in CPI_INDEX_URLS:
+        try:
+            r = requests.get(url, timeout=30)
+
+            if r.status_code != 200:
+                errors.append(f"{url}\nStatus: {r.status_code}\nResponse: {r.text[:500]}")
+                continue
+
+            meta = r.json()
+            variables = meta if isinstance(meta, list) else meta.get("variables", [])
+
+            if variables:
+                return variables, url
+
+            errors.append(f"{url}\nMetadata löytyi, mutta variables-lista oli tyhjä.")
+
+        except Exception as e:
+            errors.append(f"{url}\nVirhe: {repr(e)}")
+
+    raise RuntimeError("Metadata-haku epäonnistui kaikilla URL-vaihtoehdoilla:\n\n" + "\n\n---\n\n".join(errors))
 
 
 def _px_post(url: str, query: dict) -> pd.DataFrame:
@@ -56,7 +80,7 @@ def _month_to_date(value: str) -> pd.Timestamp:
     return pd.to_datetime(s, errors="coerce")
 
 
-def _latest_months(var: dict, months: int = 96) -> list[str]:
+def _latest_months(var: dict, months: int = 108) -> list[str]:
     values = [str(x) for x in var.get("values", [])]
     return values[-months:] if len(values) > months else values
 
@@ -90,8 +114,6 @@ def _find_code(var: dict, *terms: str) -> str | None:
     return None
 
 
-# lisää aiempaan tiedostoon: sarjoihin myös Indeksi, 3v ja 5v muutos
-
 def _add_long_term_changes(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
@@ -109,11 +131,15 @@ def _add_long_term_changes(df: pd.DataFrame) -> pd.DataFrame:
         def pct_from_years(years: int) -> float | None:
             target = latest_date - pd.DateOffset(years=years)
             prev = g[g["Date"] <= target]
+
             if prev.empty:
                 return None
+
             prev_index = float(prev.iloc[-1]["Indeksi"])
+
             if prev_index == 0:
                 return None
+
             return (latest_index / prev_index - 1.0) * 100.0
 
         row = latest.to_dict()
@@ -125,7 +151,7 @@ def _add_long_term_changes(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _fetch_category_index(months: int = 108) -> pd.DataFrame:
-    variables = _px_get_metadata(CPI_INDEX_URL)
+    variables, working_url = _px_get_metadata()
 
     time_var = _time_var(variables)
     time_code = str(time_var["code"])
@@ -140,11 +166,17 @@ def _fetch_category_index(months: int = 108) -> pd.DataFrame:
 
     info_var = _find_var_by_text(
         variables,
-        terms=["indeksi"],
+        terms=["khi"],
         skip={time_code, category_code},
     )
     info_code = str(info_var["code"])
-    info_value = _find_code(info_var, "indeksi") or str(info_var.get("values", [])[0])
+
+    info_value = (
+        _find_code(info_var, "indeksipisteluku")
+        or _find_code(info_var, "kuluttajahintaindeksi")
+        or _find_code(info_var, "khi")
+        or str(info_var.get("values", [])[0])
+    )
 
     category_values = category_var.get("values", [])
     first_category_code = str(category_values[0]) if category_values else None
@@ -160,14 +192,13 @@ def _fetch_category_index(months: int = 108) -> pd.DataFrame:
         "Energia": (
             _find_code(category_var, "sähkö", "kaasu")
             or _find_code(category_var, "sähkö")
-            or _find_code(category_var, "asuminen", "energia")
+            or _find_code(category_var, "energia")
         ),
         "Polttoaineet": (
             _find_code(category_var, "polttoaineet")
             or _find_code(category_var, "polttoaine")
         ),
     }
-    
 
     category_picks: dict[str, str] = {}
     used_codes: set[str] = set()
@@ -214,7 +245,7 @@ def _fetch_category_index(months: int = 108) -> pd.DataFrame:
         "response": {"format": "json-stat2"},
     }
 
-    df = _px_post(CPI_INDEX_URL, query)
+    df = _px_post(working_url, query)
     df = df.rename(columns={"value": "Indeksi"})
 
     df["Date"] = df[time_code].map(_month_to_date)
@@ -226,9 +257,7 @@ def _fetch_category_index(months: int = 108) -> pd.DataFrame:
 
     df["Inflaatio"] = df.groupby("Sarja")["Indeksi"].pct_change(12) * 100.0
 
-    return df[["Date", "Sarja", "Indeksi", "Inflaatio"]].dropna(subset=["Date", "Sarja", "Indeksi"])
-
-
+    return df[["Date", "Sarja", "Indeksi", "Inflaatio"]]
 
 
 @st.cache_data(
@@ -248,9 +277,10 @@ def load_inflation_pressure_bundle() -> dict:
         }
 
     except Exception as e:
+        # Tärkeää: ei nosteta virhettä eteenpäin
         return {
             "ok": False,
             "series": pd.DataFrame(),
             "latest": pd.DataFrame(),
-            "error": repr(e),
+            "error": str(e),
         }
