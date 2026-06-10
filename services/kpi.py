@@ -12,11 +12,33 @@ from services.macro_uljas import fetch_exports_products, fetch_imports_products
 
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from services.macro_data import load_unemployment
 
 
-CPI_YOY_URL = "https://pxdata.stat.fi/PXWeb/api/v1/fi/StatFin/khi/statfin_khi_pxt_122p.px"
-LFS_135Z_URL = "https://pxdata.stat.fi/PXWeb/api/v1/fi/StatFin/tyti/statfin_tyti_pxt_135z.px"
+CPI_YOY_URL = "https://pxdata.stat.fi/PxWeb/api/v1/fi/StatFin/khi/122p.px"
+LFS_135Z_URL = "https://pxdata.stat.fi/PxWeb/api/v1/fi/StatFin/tyti/135z.px"
 EUROSTAT_API = "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data"
+GDP_132H_URL = "https://pxdata.stat.fi/PxWeb/api/v1/fi/StatFin/ntp/132h.px"
+
+
+
+def _px_selection(value: str | None) -> dict:
+    if value is None or value == "*":
+        return {"filter": "all", "values": ["*"]}
+    return {"filter": "item", "values": [value]}
+
+
+def _find_var_code_by_text(meta: dict, text_needles: list[str]) -> str | None:
+    for var in meta.get("variables") or []:
+        code = str(var.get("code", ""))
+        text = str(var.get("text", ""))
+        combined = f"{code} {text}".lower()
+
+        if any(needle.lower() in combined for needle in text_needles):
+            return code
+
+    return None
+
 
 
 def _build_session() -> requests.Session:
@@ -263,14 +285,22 @@ def _add_time_columns(df: pd.DataFrame) -> pd.DataFrame:
 # -------------------------
 def fetch_inflation_now() -> tuple[Optional[float], Optional[float], str]:
     meta = _get_px_meta(CPI_YOY_URL)
-    info_code = "Tiedot"
-    time_code = _find_time_code(meta) or "Kuukausi"
-    info_val = _pick_value(meta, info_code, ["vuosimuutos", "year-on-year", "%"], fallback_first=True)
+
+    info_code = (
+        _find_var_code_by_text(meta, ["tiedot", "contentscode"])
+        or "contentscode"
+    )
+    time_code = _find_time_code(meta) or "timeperiod_m"
+
+    info_val = (
+        _pick_value(meta, info_code, ["vuosimuutos", "year-on-year", "%"], fallback_first=False)
+        or "Vuosimuutos"
+    )
 
     query = {
         "query": [
-            {"code": info_code, "selection": {"filter": "item", "values": [info_val] if info_val else ["*"]}},
             {"code": time_code, "selection": {"filter": "all", "values": ["*"]}},
+            {"code": info_code, "selection": _px_selection(info_val)},
         ],
         "response": {"format": "json-stat2"},
     }
@@ -282,6 +312,7 @@ def fetch_inflation_now() -> tuple[Optional[float], Optional[float], str]:
     f = df.copy()
     f["Arvo"] = pd.to_numeric(f["Arvo"], errors="coerce")
     f = f.dropna(subset=["Aika_dt", "Arvo"]).sort_values("Aika_dt")
+
     if f.empty:
         return None, None, ""
 
@@ -297,75 +328,31 @@ def fetch_inflation_now() -> tuple[Optional[float], Optional[float], str]:
 
 
 def fetch_unemployment_now() -> tuple[Optional[float], Optional[float], str]:
-    meta = _get_px_meta(LFS_135Z_URL)
-    vars_ = meta.get("variables") or []
-    if not vars_:
+    df = load_unemployment()
+
+    if df is None or df.empty or "unemployment_rate_sa" not in df.columns:
         return None, None, ""
 
-    time_code = _find_time_code(meta) or (vars_[-1].get("code", "Kuukausi"))
-    query_parts: list[dict] = []
-
-    for v in vars_:
-        code = v.get("code")
-        if not code:
-            continue
-
-        if code == time_code:
-            query_parts.append({"code": code, "selection": {"filter": "all", "values": ["*"]}})
-            continue
-
-        cl = _norm(code)
-
-        if cl == "tiedot":
-            values = v.get("values") or []
-            texts = v.get("valueTexts") or []
-            chosen = []
-            if values and texts and len(values) == len(texts):
-                for val, txt in zip(values, texts):
-                    t = _norm(txt)
-                    if "tyottomyysaste" in t or "unemployment rate" in t:
-                        chosen = [val]
-                        break
-            query_parts.append({"code": code, "selection": {"filter": "item", "values": chosen or ["*"]}})
-            continue
-
-        if "kausi" in cl:
-            chosen = _pick_value(meta, code, ["kausitasoitettu", "seasonally adjusted", "sa"], fallback_first=True)
-            query_parts.append({"code": code, "selection": {"filter": "item", "values": [chosen] if chosen else ["*"]}})
-            continue
-
-        if "sukupu" in cl:
-            chosen = _pick_value(meta, code, ["yhteensa", "total", "miehet ja naiset"], fallback_first=True)
-            query_parts.append({"code": code, "selection": {"filter": "item", "values": [chosen] if chosen else ["*"]}})
-            continue
-
-        if "ika" in cl:
-            chosen = _pick_value(meta, code, ["15–74", "15-74", "15 74", "yhteensa", "total"], fallback_first=True)
-            query_parts.append({"code": code, "selection": {"filter": "item", "values": [chosen] if chosen else ["*"]}})
-            continue
-
-        chosen = _pick_value(meta, code, ["yhteensa", "total"], fallback_first=True)
-        query_parts.append({"code": code, "selection": {"filter": "item", "values": [chosen] if chosen else ["*"]}})
-
-    df = _add_time_columns(
-        _post_px(LFS_135Z_URL, {"query": query_parts, "response": {"format": "json-stat2"}})
+    d = df.copy()
+    d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
+    d["unemployment_rate_sa"] = pd.to_numeric(
+        d["unemployment_rate_sa"],
+        errors="coerce",
     )
-    if df.empty:
+
+    d = d.dropna(subset=["Date", "unemployment_rate_sa"]).sort_values("Date")
+
+    if d.empty:
         return None, None, ""
 
-    f = df.copy()
-    f["Arvo"] = pd.to_numeric(f["Arvo"], errors="coerce")
-    f = f.dropna(subset=["Aika_dt", "Arvo"]).sort_values("Aika_dt")
-    if f.empty:
-        return None, None, ""
+    latest_val = float(d.iloc[-1]["unemployment_rate_sa"])
+    latest_date = pd.to_datetime(d.iloc[-1]["Date"])
 
-    latest_val = float(f["Arvo"].iloc[-1])
-    latest_date = pd.to_datetime(f["Aika_dt"].iloc[-1])
+    prev = d[d["Date"] == latest_date - pd.DateOffset(years=1)]
 
-    prev = f[f["Aika_dt"] == latest_date - pd.DateOffset(years=1)]
     delta = None
     if not prev.empty:
-        delta = latest_val - float(prev["Arvo"].iloc[-1])
+        delta = latest_val - float(prev.iloc[-1]["unemployment_rate_sa"])
 
     return latest_val, delta, f"Kuukausi {latest_date.date()}"
 
@@ -503,6 +490,66 @@ def fetch_gdp_now() -> tuple[Optional[float], Optional[float], str]:
     return latest_val_mio * 1_000_000, pct, f"Kvartaali {latest_date.date()}"
 
 
+def fetch_gdp_yoy_now() -> tuple[Optional[float], Optional[float], str]:
+    meta = _get_px_meta(GDP_132H_URL)
+
+    time_code = _find_time_code(meta) or _find_var_code_by_text(
+        meta, ["vuosineljännes", "quarter", "timeperiod_q"]
+    )
+    tx_code = _find_var_code_by_text(meta, ["taloustoimi", "transaction"])
+    info_code = _find_var_code_by_text(meta, ["tiedot", "contentscode"])
+
+    if not time_code or not tx_code or not info_code:
+        return None, None, ""
+
+    tx_val = _pick_value(
+        meta,
+        tx_code,
+        ["b1gmh", "bruttokansantuote", "gross domestic product", "gdp"],
+        fallback_first=False,
+    )
+
+    info_val = (
+        _pick_value(meta, info_code, ["volyymin muutos", "edellisestä vuodesta"], fallback_first=False)
+        or _pick_value(meta, info_code, ["muutos edellisestä vuodesta"], fallback_first=False)
+        or _pick_value(meta, info_code, ["vuosimuutos"], fallback_first=False)
+        or _pick_value(meta, info_code, ["%"], fallback_first=False)
+    )
+
+    if not tx_val or not info_val:
+        return None, None, ""
+
+    query = {
+        "query": [
+            {"code": tx_code, "selection": _px_selection(tx_val)},
+            {"code": info_code, "selection": _px_selection(info_val)},
+            {"code": time_code, "selection": {"filter": "all", "values": ["*"]}},
+        ],
+        "response": {"format": "json-stat2"},
+    }
+
+    df = _add_time_columns(_post_px(GDP_132H_URL, query))
+    if df.empty:
+        return None, None, ""
+
+    f = df.copy()
+    f["Arvo"] = pd.to_numeric(f["Arvo"], errors="coerce")
+    f = f.dropna(subset=["Aika_dt", "Arvo"]).sort_values("Aika_dt")
+
+    if f.empty:
+        return None, None, ""
+
+    latest_val = float(f["Arvo"].iloc[-1])
+    latest_date = pd.to_datetime(f["Aika_dt"].iloc[-1])
+
+    prev = f[f["Aika_dt"] == latest_date - pd.DateOffset(years=1)]
+    delta = None
+    if not prev.empty:
+        delta = latest_val - float(prev["Arvo"].iloc[-1])
+
+    return latest_val, delta, f"Kvartaali {latest_date.date()}"
+
+
 def fetch_crude_oil_now() -> tuple[Optional[float], Optional[float], str]:
     df = fetch_price_history("BZ=F", period="1y")
 
@@ -633,12 +680,12 @@ def build_kpi_items() -> List[Dict[str, Any]]:
             items.append(_build_item(name, "–", "Data puuttuu", ""))
 
     try:
-        latest_val, delta, sub = fetch_gdp_now()
+        latest_val, delta, sub = fetch_gdp_yoy_now()
         items.append(
             _build_item(
                 "BKT",
-                _fmt_money(latest_val),
-                f"{delta:+.1f}% (1 v)" if delta is not None else "",
+                f"{_fmt(latest_val, 2)} %",
+                f"{delta:+.2f} %-yks (1 v)" if delta is not None else "",
                 sub,
             )
         )

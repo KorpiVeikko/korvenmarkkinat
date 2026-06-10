@@ -4,9 +4,9 @@ import pandas as pd
 import requests
 from pyjstat import pyjstat
 
-ASUNTOKAUPAT_URL = "https://pxdata.stat.fi/PxWeb/api/v1/fi/StatFin/ashi/statfin_ashi_pxt_12dd.px"
+ASUNTOKAUPAT_URL = "https://pxdata.stat.fi/PxWeb/api/v1/fi/StatFin/ashi/12dd.px"
 PELTO_URL = "https://statdb.luke.fi/PxWeb/api/v1/fi/LUKE/maa/peltov/0100_peltov.px"
-TONTTI_URL = "https://pxdata.stat.fi/PxWeb/api/v1/fi/StatFin/kihi/statfin_kihi_pxt_11jb.px"
+TONTTI_URL = "https://pxdata.stat.fi/PxWeb/api/v1/fi/StatFin/kihi/11jb.px"
 
 
 def _fetch_pxweb_json(url: str, query: dict) -> dict:
@@ -30,12 +30,16 @@ def fetch_realestate_counts() -> pd.DataFrame:
     query = {
         "query": [
             {
-                "code": "Alue",
+                "code": "alue_3_20181009",
                 "selection": {"filter": "item", "values": ["ksu"]},
             },
             {
-                "code": "Tiedot",
+                "code": "contentscode",
                 "selection": {"filter": "item", "values": ["lkm_julk_uudet"]},
+            },
+            {
+                "code": "timeperiod_q",
+                "selection": {"filter": "all", "values": ["*"]},
             },
         ],
         "response": {"format": "json-stat2"},
@@ -47,12 +51,16 @@ def fetch_realestate_prices() -> pd.DataFrame:
     query = {
         "query": [
             {
-                "code": "Alue",
+                "code": "alue_3_20181009",
                 "selection": {"filter": "item", "values": ["ksu"]},
             },
             {
-                "code": "Tiedot",
+                "code": "contentscode",
                 "selection": {"filter": "item", "values": ["keskihinta_uudet"]},
+            },
+            {
+                "code": "timeperiod_q",
+                "selection": {"filter": "all", "values": ["*"]},
             },
         ],
         "response": {"format": "json-stat2"},
@@ -64,7 +72,13 @@ def clean_realestate_df(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=["Kvartaali", "Arvo"])
 
-    out = df.rename(columns={"value": "Arvo", "Vuosineljännes": "Kvartaali"}).copy()
+    out = df.rename(
+        columns={
+            "value": "Arvo",
+            "Vuosineljännes": "Kvartaali",
+            "timeperiod_q": "Kvartaali",
+        }
+    ).copy()
 
     if "Kvartaali" not in out.columns:
         return pd.DataFrame(columns=["Kvartaali", "Arvo"])
@@ -188,38 +202,50 @@ def add_yoy_change_yearly(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def fetch_detached_plot_data() -> pd.DataFrame:
-    """
-    Omakotitalotontit:
-    - 01 = Koko maa
-    - 08,09,10,11 = Etelä-, Länsi-, Itä- ja Pohjois-Suomi
-    - keskihinta = Neliöhinta (EUR/m2)
-    """
     query = {
         "query": [
             {
-                "code": "Aluejako",
+                "code": "alue_21_20131212",
                 "selection": {
                     "filter": "item",
                     "values": ["01", "08", "09", "10", "11"],
                 },
             },
             {
-                "code": "Tiedot",
+                "code": "contentscode",
                 "selection": {
                     "filter": "item",
                     "values": [
-                        "ketjutettu_lv",
+                        "kihi-ketjutettu_lv",
                         "realind_lv",
-                        "keskihinta",
-                        "lkm_julk",
+                        "kihi-keskihinta",
                     ],
                 },
+            },
+            {
+                "code": "timeperiod_q",
+                "selection": {"filter": "all", "values": ["*"]},
             },
         ],
         "response": {"format": "json-stat2"},
     }
 
     return pd.DataFrame(_fetch_pxweb_df(TONTTI_URL, query))
+
+
+def _fetch_pxweb_json(url: str, query: dict) -> dict:
+    r = requests.post(url, json=query, timeout=30)
+
+    if r.status_code != 200:
+        raise RuntimeError(
+            "PXWeb POST epäonnistui.\n\n"
+            f"URL: {url}\n"
+            f"Status: {r.status_code}\n\n"
+            f"Query:\n{query}\n\n"
+            f"Response:\n{r.text[:2000]}"
+        )
+
+    return r.json()
 
 
 def _normalize_detached_area(value: str) -> str:
@@ -244,13 +270,13 @@ def _normalize_detached_area(value: str) -> str:
 def _normalize_detached_metric(value: str) -> str:
     s = str(value).strip().lower()
 
-    if s == "ketjutettu_lv" or s == "indeksi":
+    if s in {"kihi-ketjutettu_lv", "ketjutettu_lv", "indeksi"}:
         return "Hintaindeksi"
     if s == "realind_lv" or "reaalihintaindeksi" in s:
         return "Reaalihintaindeksi"
-    if s == "keskihinta" or "neliöhinta" in s:
+    if s in {"kihi-keskihinta", "keskihinta"} or "neliöhinta" in s:
         return "Neliöhinta"
-    if s == "lkm_julk" or "kauppojen lukumäärä" in s:
+    if s in {"lkm_julk", "kihi-lkm_julk"} or "kauppojen lukumäärä" in s:
         return "Kauppojen lukumäärä"
 
     return str(value).strip()
@@ -264,8 +290,11 @@ def clean_detached_plot_df(df: pd.DataFrame) -> pd.DataFrame:
 
     rename_map = {
         "Aluejako": "Alue",
+        "alue_21_20131212": "Alue",
         "Vuosineljännes": "Jakso",
+        "timeperiod_q": "Jakso",
         "Tiedot": "Tiedot",
+        "contentscode": "Tiedot",
         "value": "Arvo",
     }
     out = out.rename(columns=rename_map)
@@ -290,3 +319,23 @@ def clean_detached_plot_df(df: pd.DataFrame) -> pd.DataFrame:
     out = out.sort_values(["Tiedot", "Alue", "Jakso_dt"]).reset_index(drop=True)
 
     return out[["Jakso", "Jakso_dt", "Vuosi", "Alue", "Tiedot", "Arvo"]]
+
+
+def debug_pxweb_metadata(url: str) -> str:
+    try:
+        meta = _fetch_pxweb_metadata(url)
+        variables = meta if isinstance(meta, list) else meta.get("variables", [])
+
+        lines = [f"URL: {url}", ""]
+
+        for var in variables:
+            lines.append(f"code: {var.get('code')}")
+            lines.append(f"text: {var.get('text')}")
+            lines.append(f"values: {var.get('values', [])[:10]}")
+            lines.append(f"valueTexts: {var.get('valueTexts', [])[:10]}")
+            lines.append("---")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return repr(e)

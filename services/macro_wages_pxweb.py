@@ -7,19 +7,33 @@ from services.macro_pxweb_common import (
     find_time_code,
     get_px_meta,
     pick_value,
+    pick_value_no_fallback,
     post_px,
 )
 
-ATI_Q_URL = "https://pxdata.stat.fi/PXWeb/api/v1/fi/StatFin/ati/statfin_ati_pxt_14um.px"
-ATI_WAGES_Q_URL = "https://pxdata.stat.fi/PXWeb/api/v1/fi/StatFin/ati/statfin_ati_pxt_14uv.px"
+ATI_Q_URL = "https://pxdata.stat.fi/PxWeb/api/v1/fi/StatFin/ati/14um.px"
+ATI_WAGES_Q_URL = "https://pxdata.stat.fi/PxWeb/api/v1/fi/StatFin/ati/14uv.px"
+
+
+def _px_selection(value: str | None) -> dict:
+    if value is None or value == "*":
+        return {"filter": "all", "values": ["*"]}
+    return {"filter": "item", "values": [value]}
+
+
+def _norm(s: str) -> str:
+    return str(s).lower().replace("ä", "a").replace("ö", "o").replace("å", "a")
 
 
 def _find_var_code(meta: dict, candidates: list[str]) -> str | None:
     for var in meta.get("variables") or []:
         code = str(var.get("code", ""))
-        code_l = code.strip().lower()
-        if any(token in code_l for token in candidates):
+        text = str(var.get("text", ""))
+        combined = _norm(f"{code} {text}")
+
+        if any(_norm(token) in combined for token in candidates):
             return code
+
     return None
 
 
@@ -28,7 +42,7 @@ def _resolve_sector_column(df: pd.DataFrame, preferred_code: str | None) -> str 
         return preferred_code
 
     for col in df.columns:
-        col_l = str(col).lower()
+        col_l = _norm(col)
         if "sector" in col_l or "sektori" in col_l:
             return col
 
@@ -36,35 +50,44 @@ def _resolve_sector_column(df: pd.DataFrame, preferred_code: str | None) -> str 
 
 
 def fetch_wage_level_sector_quarterly() -> pd.DataFrame:
-    """
-    columns:
-      Date, Sector, wage_eur
-    """
     meta = get_px_meta(ATI_WAGES_Q_URL)
     if not (meta.get("variables") or []):
         return pd.DataFrame()
 
-    time_code = find_time_code(meta) or "Vuosineljännes"
+    time_code = find_time_code(meta) or _find_var_code(meta, ["vuosineljännes", "quarter", "timeperiod_q"])
     sector_code = _find_var_code(meta, ["sector", "sektori"])
-    gender_code = _find_var_code(meta, ["gender", "sukupuoli"])
-    info_code = _find_var_code(meta, ["information", "tiedot"])
+    gender_code = _find_var_code(meta, ["gender", "sukupuoli", "sex"])
+    info_code = _find_var_code(meta, ["information", "tiedot", "contentscode"])
 
-    info_val = pick_value(meta, info_code, ["average monthly earnings", "keskiansiot"], fallback_first=True)
-    gender_val = pick_value(meta, gender_code, ["total", "yhteensä", "yhteensa"], fallback_first=True)
+    if not time_code:
+        return pd.DataFrame()
+
+    info_val = pick_value(
+        meta,
+        info_code,
+        ["average monthly earnings", "keskiansiot", "keskimääräiset kuukausiansiot"],
+        fallback_first=False,
+    )
+
+    gender_val = pick_value(
+        meta,
+        gender_code,
+        ["total", "yhteensä", "yhteensa", "miehet ja naiset"],
+        fallback_first=False,
+    )
 
     query = {"query": [], "response": {"format": "json-stat2"}}
 
     if sector_code:
         query["query"].append({"code": sector_code, "selection": {"filter": "all", "values": ["*"]}})
+
     if gender_code:
-        query["query"].append(
-            {"code": gender_code, "selection": {"filter": "item", "values": [gender_val] if gender_val else ["*"]}}
-        )
+        query["query"].append({"code": gender_code, "selection": _px_selection(gender_val)})
+
     query["query"].append({"code": time_code, "selection": {"filter": "all", "values": ["*"]}})
+
     if info_code:
-        query["query"].append(
-            {"code": info_code, "selection": {"filter": "item", "values": [info_val] if info_val else ["*"]}}
-        )
+        query["query"].append({"code": info_code, "selection": _px_selection(info_val)})
 
     df = add_quarter_date(post_px(ATI_WAGES_Q_URL, query))
     if df.empty:
@@ -72,10 +95,10 @@ def fetch_wage_level_sector_quarterly() -> pd.DataFrame:
 
     sector_col = _resolve_sector_column(df, sector_code)
     df["Sector"] = df[sector_col].astype(str) if sector_col else "Kaikki"
+    df["wage_eur"] = pd.to_numeric(df["Arvo"], errors="coerce")
 
     return (
-        df[["Date", "Sector", "Arvo"]]
-        .rename(columns={"Arvo": "wage_eur"})
+        df[["Date", "Sector", "wage_eur"]]
         .dropna(subset=["Date", "wage_eur"])
         .sort_values(["Sector", "Date"])
         .reset_index(drop=True)
@@ -83,28 +106,28 @@ def fetch_wage_level_sector_quarterly() -> pd.DataFrame:
 
 
 def fetch_wage_index_sector_quarterly() -> pd.DataFrame:
-    """
-    columns:
-      Date, Sector, wage_index, real_wage_index
-    """
     meta = get_px_meta(ATI_Q_URL)
     if not (meta.get("variables") or []):
         return pd.DataFrame()
 
-    time_code = find_time_code(meta) or "Vuosineljännes"
+    time_code = find_time_code(meta) or _find_var_code(meta, ["vuosineljännes", "quarter", "timeperiod_q"])
     sector_code = _find_var_code(meta, ["sector", "sektori"])
-    info_code = _find_var_code(meta, ["information", "tiedot"])
+    info_code = _find_var_code(meta, ["information", "tiedot", "contentscode"])
+
+    if not time_code or not info_code:
+        return pd.DataFrame()
 
     wage_index_val = pick_value(
         meta,
         info_code,
-        ["index of wage and salary earnings", "ansiotasoindeksi"],
+        ["ansiotasoindeksi", "index of wage and salary earnings"],
         fallback_first=False,
     )
+
     real_index_val = pick_value(
         meta,
         info_code,
-        ["index of real wage and salary earnings", "reaaliansio"],
+        ["reaaliansio", "real wage"],
         fallback_first=False,
     )
 
@@ -121,9 +144,9 @@ def fetch_wage_index_sector_quarterly() -> pd.DataFrame:
 
         if sector_code:
             query["query"].append({"code": sector_code, "selection": {"filter": "all", "values": ["*"]}})
+
         query["query"].append({"code": time_code, "selection": {"filter": "all", "values": ["*"]}})
-        if info_code:
-            query["query"].append({"code": info_code, "selection": {"filter": "item", "values": [chosen_val]}})
+        query["query"].append({"code": info_code, "selection": _px_selection(chosen_val)})
 
         df = add_quarter_date(post_px(ATI_Q_URL, query))
         if df.empty:
@@ -131,13 +154,14 @@ def fetch_wage_index_sector_quarterly() -> pd.DataFrame:
 
         sector_col = _resolve_sector_column(df, sector_code)
         df["Sector"] = df[sector_col].astype(str) if sector_col else "Kaikki"
+        df[out_name] = pd.to_numeric(df["Arvo"], errors="coerce")
 
         tmp = (
-            df[["Date", "Sector", "Arvo"]]
-            .rename(columns={"Arvo": out_name})
+            df[["Date", "Sector", out_name]]
             .dropna(subset=["Date", out_name])
             .sort_values(["Sector", "Date"])
         )
+
         frames.append(tmp)
 
     if not frames:
@@ -185,14 +209,14 @@ def sector_options(df: pd.DataFrame) -> list[str]:
     vals = sorted(df["Sector"].dropna().astype(str).unique().tolist())
 
     preferred = [
-        "Total economy",
         "Koko kansantalous",
-        "Total",
+        "Total economy",
         "Yhteensä",
-        "General government",
+        "Total",
         "Julkinen sektori",
-        "Private sector",
+        "General government",
         "Yksityinen sektori",
+        "Private sector",
     ]
 
     ordered: list[str] = []

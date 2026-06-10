@@ -1,3 +1,5 @@
+# macro_data.py
+
 from __future__ import annotations
 
 import math
@@ -18,11 +20,30 @@ from services.macro_pxweb_common import (
 from services.macro_uljas import fetch_exports_products, fetch_imports_products
 from services.macro_wages_pxweb import build_wage_panel
 
-CPI_YOY_URL = "https://pxdata.stat.fi/PXWeb/api/v1/fi/StatFin/khi/statfin_khi_pxt_122p.px"
-GDP_132H_URL = "https://pxdata.stat.fi/PXWeb/api/v1/fi/StatFin/ntp/statfin_ntp_pxt_132h.px"
-LFS_135Z_URL = "https://pxdata.stat.fi/PXWeb/api/v1/fi/StatFin/tyti/statfin_tyti_pxt_135z.px"
+CPI_YOY_URL = "https://pxdata.stat.fi/PxWeb/api/v1/fi/StatFin/khi/122p.px"
+GDP_132H_URL = "https://pxdata.stat.fi/PxWeb/api/v1/fi/StatFin/ntp/132h.px"
+LFS_135Z_URL = "https://pxdata.stat.fi/PxWeb/api/v1/fi/StatFin/tyti/135z.px"
 EUROSTAT_API = "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data"
 ECB_API_BASE = "https://data-api.ecb.europa.eu/service/data"
+
+
+def _px_selection(value: str | None) -> dict:
+    if value is None or value == "*":
+        return {"filter": "all", "values": ["*"]}
+    return {"filter": "item", "values": [value]}
+
+
+def _find_var_code_by_text(meta: dict, text_needles: list[str]) -> str | None:
+    for var in meta.get("variables") or []:
+        code = str(var.get("code", ""))
+        text = str(var.get("text", ""))
+        combined = f"{code} {text}".lower()
+
+        if any(needle.lower() in combined for needle in text_needles):
+            return code
+
+    return None
+
 
 
 def fmt(x: float | None, decimals: int = 1, suffix: str = "") -> str:
@@ -211,17 +232,26 @@ def build_trade_balance(exports_df: pd.DataFrame, imports_df: pd.DataFrame) -> p
 
 def fetch_inflation_yoy() -> pd.DataFrame:
     meta = get_px_meta(CPI_YOY_URL)
-    info_code = "Tiedot"
-    time_code = find_time_code(meta) or "Kuukausi"
-    info_val = pick_value(meta, info_code, ["vuosimuutos", "year-on-year", "%"], fallback_first=True)
+
+    info_code = (
+        _find_var_code_by_text(meta, ["tiedot", "contentscode"])
+        or "contentscode"
+    )
+    time_code = find_time_code(meta) or "timeperiod_m"
+
+    info_val = (
+        pick_value(meta, info_code, ["vuosimuutos", "year-on-year", "%"], fallback_first=False)
+        or "Vuosimuutos"
+    )
 
     query = {
         "query": [
-            {"code": info_code, "selection": {"filter": "item", "values": [info_val] if info_val else ["*"]}},
             {"code": time_code, "selection": {"filter": "all", "values": ["*"]}},
+            {"code": info_code, "selection": _px_selection(info_val)},
         ],
         "response": {"format": "json-stat2"},
     }
+
     return add_time_columns(post_px(CPI_YOY_URL, query))
 
 
@@ -241,25 +271,35 @@ def build_inflation_series(df: pd.DataFrame) -> pd.DataFrame:
 
 def fetch_gdp_growth_yoy() -> pd.DataFrame:
     meta = get_px_meta(GDP_132H_URL)
-    variables = meta.get("variables") or []
-    if not variables:
+
+    time_code = find_time_code(meta) or _find_var_code_by_text(meta, ["vuosineljännes", "quarter", "timeperiod_q"])
+    tx_code = _find_var_code_by_text(meta, ["taloustoimi", "transaction"])
+    info_code = _find_var_code_by_text(meta, ["tiedot", "contentscode"])
+
+    if not time_code or not tx_code or not info_code:
         return pd.DataFrame()
 
-    time_code = find_time_code(meta) or "Vuosineljännes"
-    tx_code = "Taloustoimi"
-    info_code = "Tiedot"
-
-    tx_val = pick_value(meta, tx_code, ["b1gmh", "bruttokansantuote", "gdp"], fallback_first=True)
-    info_yoy = (
-        pick_value(meta, info_code, ["%", "edellisestä vuodesta"], fallback_first=False)
-        or pick_value(meta, info_code, ["edellisestä vuodesta"], fallback_first=False)
-        or pick_value(meta, info_code, ["vuosimuutos", "%"], fallback_first=True)
+    tx_val = pick_value(
+        meta,
+        tx_code,
+        ["b1gmh", "bruttokansantuote", "gross domestic product", "gdp"],
+        fallback_first=False,
     )
+
+    info_yoy = (
+        pick_value(meta, info_code, ["volyymin muutos", "edellisestä vuodesta"], fallback_first=False)
+        or pick_value(meta, info_code, ["muutos edellisestä vuodesta"], fallback_first=False)
+        or pick_value(meta, info_code, ["vuosimuutos"], fallback_first=False)
+        or pick_value(meta, info_code, ["%"], fallback_first=False)
+    )
+
+    if not tx_val or not info_yoy:
+        return pd.DataFrame()
 
     query = {
         "query": [
-            {"code": tx_code, "selection": {"filter": "item", "values": [tx_val] if tx_val else ["*"]}},
-            {"code": info_code, "selection": {"filter": "item", "values": [info_yoy] if info_yoy else ["*"]}},
+            {"code": tx_code, "selection": _px_selection(tx_val)},
+            {"code": info_code, "selection": _px_selection(info_yoy)},
             {"code": time_code, "selection": {"filter": "all", "values": ["*"]}},
         ],
         "response": {"format": "json-stat2"},
@@ -276,7 +316,12 @@ def fetch_gdp_growth_yoy() -> pd.DataFrame:
     if f.empty:
         return pd.DataFrame()
 
-    return f[["Aika_dt", "Arvo"]].rename(columns={"Aika_dt": "Date", "Arvo": "gdp_yoy"})
+    return (
+        f[["Aika_dt", "Arvo"]]
+        .rename(columns={"Aika_dt": "Date", "Arvo": "gdp_yoy"})
+        .sort_values("Date")
+        .reset_index(drop=True)
+    )
 
 
 def _fetch_unemployment_series(
@@ -289,7 +334,11 @@ def _fetch_unemployment_series(
     if not variables:
         return pd.DataFrame()
 
-    time_code = find_time_code(meta) or variables[-1].get("code", "Kuukausi")
+    time_code = find_time_code(meta) or _find_var_code_by_text(meta, ["kuukausi", "month", "timeperiod_m"])
+    info_code = _find_var_code_by_text(meta, ["tiedot", "contentscode", "tunnusluku"])
+    if not time_code or not info_code:
+        return pd.DataFrame()
+
     query_parts: list[dict] = []
 
     for var in variables:
@@ -298,49 +347,46 @@ def _fetch_unemployment_series(
             continue
 
         norm_code = norm(code)
+        text = norm(var.get("text", ""))
+        combined = f"{norm_code} {text}"
 
         if code == time_code:
             query_parts.append({"code": code, "selection": {"filter": "all", "values": ["*"]}})
             continue
 
-        if norm_code == "tiedot":
+        if code == info_code:
             chosen = pick_value_no_fallback(meta, code, info_needles)
             if not chosen:
                 return pd.DataFrame()
-            query_parts.append({"code": code, "selection": {"filter": "item", "values": [chosen]}})
+            query_parts.append({"code": code, "selection": _px_selection(chosen)})
             continue
 
-        if "kausi" in norm_code:
+        if "kausi" in combined or "season" in combined:
+            chosen = None
             if kausi_needles:
                 chosen = pick_value_no_fallback(meta, code, kausi_needles)
-                if not chosen:
-                    return pd.DataFrame()
-                query_parts.append({"code": code, "selection": {"filter": "item", "values": [chosen]}})
-            else:
-                chosen = pick_value(meta, code, ["kausitasoitettu", "seasonally adjusted", "sa"], fallback_first=True)
-                query_parts.append(
-                    {"code": code, "selection": {"filter": "item", "values": [chosen] if chosen else ["*"]}}
-                )
+            if not chosen:
+                chosen = pick_value(meta, code, ["kausitasoitettu", "seasonally adjusted"], fallback_first=False)
+            if not chosen:
+                return pd.DataFrame()
+            query_parts.append({"code": code, "selection": _px_selection(chosen)})
             continue
 
-        if "sukupu" in norm_code:
-            chosen = pick_value(meta, code, ["yhteensä", "yhteensa", "total", "miehet ja naiset"], fallback_first=True)
-            query_parts.append(
-                {"code": code, "selection": {"filter": "item", "values": [chosen] if chosen else ["*"]}}
+        if "sukupu" in combined or "sex" in combined:
+            chosen = pick_value(meta, code, ["yhteensä", "yhteensa", "total", "miehet ja naiset"], fallback_first=False)
+            query_parts.append({"code": code, "selection": _px_selection(chosen)})
+            continue
+
+        if "ika" in combined or "age" in combined:
+            chosen = (
+                pick_value(meta, code, ["15–74", "15-74", "15 74"], fallback_first=False)
+                or pick_value(meta, code, ["yhteensä", "yhteensa", "total"], fallback_first=False)
             )
+            query_parts.append({"code": code, "selection": _px_selection(chosen)})
             continue
 
-        if "ika" in norm_code:
-            chosen = pick_value(meta, code, ["15–74", "15-74", "15 74", "yhteensä", "yhteensa", "total"], fallback_first=True)
-            query_parts.append(
-                {"code": code, "selection": {"filter": "item", "values": [chosen] if chosen else ["*"]}}
-            )
-            continue
-
-        chosen = pick_value(meta, code, ["yhteensä", "yhteensa", "total"], fallback_first=True)
-        query_parts.append(
-            {"code": code, "selection": {"filter": "item", "values": [chosen] if chosen else ["*"]}}
-        )
+        chosen = pick_value(meta, code, ["yhteensä", "yhteensa", "total"], fallback_first=False)
+        query_parts.append({"code": code, "selection": _px_selection(chosen)})
 
     query = {"query": query_parts, "response": {"format": "json-stat2"}}
     df = add_time_columns(post_px(LFS_135Z_URL, query))
@@ -355,13 +401,19 @@ def _fetch_unemployment_series(
     if f.empty:
         return pd.DataFrame()
 
-    return (
+    out = (
         f.groupby("Aika_dt", as_index=False)["Arvo"]
         .mean()
         .rename(columns={"Aika_dt": "Date", "Arvo": value_name})
         .sort_values("Date")
     )
 
+    if value_name in {"unemployment_rate_sa", "unemployment_rate_trend"}:
+        vals = pd.to_numeric(out[value_name], errors="coerce").dropna()
+        if not vals.empty and vals.iloc[-1] > 30:
+            return pd.DataFrame()
+
+    return out
 
 def fetch_unemployment_135z() -> pd.DataFrame:
     meta = get_px_meta(LFS_135Z_URL)
@@ -371,19 +423,21 @@ def fetch_unemployment_135z() -> pd.DataFrame:
     rate_sa = _fetch_unemployment_series(
         meta,
         info_needles=["työttömyysaste", "unemployment rate"],
-        kausi_needles=["kausitasoitettu", "seasonally adjusted", "sa"],
+        kausi_needles=["kausitasoitettu", "seasonally adjusted"],
         value_name="unemployment_rate_sa",
     )
+
     rate_trend = _fetch_unemployment_series(
         meta,
         info_needles=["työttömyysaste", "unemployment rate"],
         kausi_needles=["trendi", "trend"],
         value_name="unemployment_rate_trend",
     )
+
     level_sa = _fetch_unemployment_series(
         meta,
-        info_needles=["työttömät", "unemployed"],
-        kausi_needles=["kausitasoitettu", "seasonally adjusted", "sa"],
+        info_needles=["työttömät", "unemployed persons", "unemployed"],
+        kausi_needles=["kausitasoitettu", "seasonally adjusted"],
         value_name="unemployed_1000_sa",
     )
 
@@ -799,16 +853,16 @@ def ecb_fetch_euribor_12m() -> tuple[pd.DataFrame, dict]:
 
 def fetch_gdp_demand_components_yoy() -> pd.DataFrame:
     meta = get_px_meta(GDP_132H_URL)
-    variables = meta.get("variables") or []
-    if not variables:
+
+    time_code = find_time_code(meta) or _find_var_code_by_text(meta, ["vuosineljännes", "quarter", "timeperiod_q"])
+    tx_code = _find_var_code_by_text(meta, ["taloustoimi", "transaction"])
+    info_code = _find_var_code_by_text(meta, ["tiedot", "contentscode"])
+
+    if not time_code or not tx_code or not info_code:
         return pd.DataFrame()
 
-    time_code = find_time_code(meta) or "Vuosineljännes"
-    tx_code = "Taloustoimi"
-    info_code = "Tiedot"
-
     component_specs = {
-        "BKT": ["b1gmh", "bruttokansantuote"],
+        "BKT": ["b1gmh", "bruttokansantuote", "gross domestic product"],
         "Yksityinen kulutus": ["yksityiset kulutusmenot"],
         "Julkinen kulutus": ["julkiset kulutusmenot"],
         "Investoinnit": ["kiinteän pääoman bruttomuodostus", "investoinnit"],
@@ -829,15 +883,19 @@ def fetch_gdp_demand_components_yoy() -> pd.DataFrame:
         return pd.DataFrame()
 
     info_yoy = (
-        pick_value(meta, info_code, ["%", "edellisestä vuodesta"], fallback_first=False)
-        or pick_value(meta, info_code, ["edellisestä vuodesta"], fallback_first=False)
-        or pick_value(meta, info_code, ["vuosimuutos", "%"], fallback_first=True)
+        pick_value(meta, info_code, ["volyymin muutos", "edellisestä vuodesta"], fallback_first=False)
+        or pick_value(meta, info_code, ["muutos edellisestä vuodesta"], fallback_first=False)
+        or pick_value(meta, info_code, ["vuosimuutos"], fallback_first=False)
+        or pick_value(meta, info_code, ["%"], fallback_first=False)
     )
+
+    if not info_yoy:
+        return pd.DataFrame()
 
     query = {
         "query": [
             {"code": tx_code, "selection": {"filter": "item", "values": selected_values}},
-            {"code": info_code, "selection": {"filter": "item", "values": [info_yoy] if info_yoy else ["*"]}},
+            {"code": info_code, "selection": _px_selection(info_yoy)},
             {"code": time_code, "selection": {"filter": "all", "values": ["*"]}},
         ],
         "response": {"format": "json-stat2"},
@@ -855,19 +913,6 @@ def fetch_gdp_demand_components_yoy() -> pd.DataFrame:
         return pd.DataFrame()
 
     f["Komponentti"] = f[tx_code].astype(str).map(value_to_name)
-
-    # Jos PXWeb palauttaa tekstin eikä koodia, tunnistetaan vielä tekstistä.
-    missing = f["Komponentti"].isna()
-    if missing.any():
-        txt = f.loc[missing, tx_code].astype(str).str.lower()
-
-        f.loc[missing & txt.str.contains("bruttokansantuote", na=False), "Komponentti"] = "BKT"
-        f.loc[missing & txt.str.contains("yksityiset kulutusmenot", na=False), "Komponentti"] = "Yksityinen kulutus"
-        f.loc[missing & txt.str.contains("julkiset kulutusmenot", na=False), "Komponentti"] = "Julkinen kulutus"
-        f.loc[missing & txt.str.contains("kiinteän pääoman bruttomuodostus|investoin", na=False, regex=True), "Komponentti"] = "Investoinnit"
-        f.loc[missing & txt.str.contains("vienti", na=False), "Komponentti"] = "Vienti"
-        f.loc[missing & txt.str.contains("tuonti", na=False), "Komponentti"] = "Tuonti"
-
     f = f.dropna(subset=["Komponentti"])
 
     return (

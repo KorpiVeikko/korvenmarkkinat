@@ -34,6 +34,9 @@ from services.realestate_pxweb import (
     fetch_farmland_prices,
     fetch_realestate_counts,
     fetch_realestate_prices,
+    debug_pxweb_metadata, 
+    ASUNTOKAUPAT_URL, 
+    TONTTI_URL
 )
 
 from services.realestate_analysis import build_realestate_analysis_bundle

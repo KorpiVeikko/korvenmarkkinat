@@ -47,7 +47,7 @@ def render() -> None:
     st.caption(
         "Lähteet: Tilastokeskus / StatFin, Tulli / Uljas, Eurostat ja ECB. "
         "Sisältö: inflaatio, BKT, työttömyys, palkat, vienti, tuonti, kauppatase, "
-        "julkinen velka ja yksityinen velka."
+        "julkinen velka, yksityinen velka ja korot."
     )
 
     section_options = [
@@ -73,12 +73,22 @@ def render() -> None:
     st.divider()
 
     if section == "📈 Inflaatio":
-        pressure_bundle = load_inflation_pressure_bundle()
-        render_inflation_pressure_section(pressure_bundle)
+        try:
+            pressure_bundle = load_inflation_pressure_bundle()
+            render_inflation_pressure_section(pressure_bundle)
+        except Exception as e:
+            st.warning("Arjen inflaatiopainetta ei saatu ladattua.")
+            with st.expander("Tekninen virhe"):
+                st.code(repr(e))
 
         with st.expander("📊 Näytä vanha virallinen inflaatiokuvaaja", expanded=False):
-            infl = load_inflation()
-            render_inflation_section(infl, YEARS)
+            try:
+                infl = load_inflation()
+                render_inflation_section(infl, YEARS)
+            except Exception as e:
+                st.warning("Virallista inflaatiokuvaajaa ei saatu ladattua.")
+                with st.expander("Tekninen virhe"):
+                    st.code(repr(e))
 
     elif section == "🏛️ BKT":
         gdp_yoy = load_gdp_yoy()
