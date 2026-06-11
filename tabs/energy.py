@@ -69,6 +69,32 @@ def direction_text(value: float) -> str:
     return "ei selkeää suuntaa"
 
 
+def _resolve_price_columns(df: pd.DataFrame) -> tuple[str | None, str | None, str | None]:
+    consumer_col = find_consumer_col(df)
+    component_col = find_component_col(df)
+    measure_col = find_measure_col(df)
+
+    if not consumer_col:
+        for candidate in ["Kuluttajaryhmä", "Kuluttajaryhma", "Hintaluokka"]:
+            if candidate in df.columns:
+                consumer_col = candidate
+                break
+
+    if not component_col:
+        for candidate in ["Hintakomponentti", "Komponentti"]:
+            if candidate in df.columns:
+                component_col = candidate
+                break
+
+    if not measure_col:
+        for candidate in ["Tiedot", "contentscode"]:
+            if candidate in df.columns:
+                measure_col = candidate
+                break
+
+    return consumer_col, component_col, measure_col
+
+
 def _corr_text(value: float) -> str:
     v = abs(value)
     if v > 0.7:
@@ -691,6 +717,7 @@ def _render_spot_prices():
         name="24 h keskiarvo",
         hovertemplate="24 h keskiarvo: %{y:.1f} snt/kWh<extra></extra>",
     )
+    
 
     fig.update_traces(
         selector=dict(type="bar"),
@@ -720,9 +747,7 @@ def _render_household_electricity_prices():
         st.info("Kotitaloussähkön hintadataa ei saatu ladattua.")
         return
 
-    consumer_col = find_consumer_col(df)
-    component_col = find_component_col(df)
-    measure_col = find_measure_col(df)
+    consumer_col, component_col, measure_col = _resolve_price_columns(df)
 
     if not consumer_col or not component_col:
         st.error(f"En löytänyt tarvittavia hintasarakkeita. Sarakkeet: {list(df.columns)}")
@@ -916,9 +941,7 @@ def _render_price_vs_shares():
         st.warning("Kotitaloussähkön hintadataa ei saatu ladattua.")
         return
 
-    consumer_col = find_consumer_col(price_df)
-    component_col = find_component_col(price_df)
-    measure_col = find_measure_col(price_df)
+    consumer_col, component_col, measure_col = _resolve_price_columns(price_df)
 
     if not consumer_col or not component_col:
         st.error(f"En löytänyt tarvittavia hintasarakkeita. Sarakkeet: {list(price_df.columns)}")
