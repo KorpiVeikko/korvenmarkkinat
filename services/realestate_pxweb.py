@@ -9,6 +9,27 @@ PELTO_URL = "https://statdb.luke.fi/PxWeb/api/v1/fi/LUKE/maa/peltov/0100_peltov.
 TONTTI_URL = "https://pxdata.stat.fi/PxWeb/api/v1/fi/StatFin/kihi/11jb.px"
 
 
+def _find_value_by_text(meta: dict, var_code: str, needles: list[str]) -> str | None:
+    variables = meta if isinstance(meta, list) else meta.get("variables", [])
+
+    var = next(
+        (v for v in variables if str(v.get("code")) == str(var_code)),
+        None,
+    )
+    if not var:
+        return None
+
+    values = [str(x) for x in var.get("values", [])]
+    texts = [str(x) for x in var.get("valueTexts", [])]
+
+    for val, txt in zip(values, texts):
+        txt_l = str(txt).lower()
+        if all(n.lower() in txt_l for n in needles):
+            return val
+
+    return None
+
+
 def _fetch_pxweb_json(url: str, query: dict) -> dict:
     r = requests.post(url, json=query, timeout=30)
     r.raise_for_status()
@@ -202,6 +223,23 @@ def add_yoy_change_yearly(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def fetch_detached_plot_data() -> pd.DataFrame:
+    meta = _fetch_pxweb_metadata(TONTTI_URL)
+
+    metric_values = [
+        "kihi-ketjutettu_lv",
+        "realind_lv",
+        "kihi-keskihinta",
+    ]
+
+    trade_count_value = _find_value_by_text(
+        meta,
+        "contentscode",
+        ["kauppojen", "lukumäärä"],
+    )
+
+    if trade_count_value:
+        metric_values.append(trade_count_value)
+
     query = {
         "query": [
             {
@@ -215,11 +253,7 @@ def fetch_detached_plot_data() -> pd.DataFrame:
                 "code": "contentscode",
                 "selection": {
                     "filter": "item",
-                    "values": [
-                        "kihi-ketjutettu_lv",
-                        "realind_lv",
-                        "kihi-keskihinta",
-                    ],
+                    "values": metric_values,
                 },
             },
             {

@@ -34,6 +34,38 @@ ELECTRICITY_SERIES_VALUES = [
 PRICE_COMPONENT_VALUES = ["A", "B", "C", "SSS"]
 
 
+def _label_map(meta: dict, var_code: str | None) -> dict[str, str]:
+    var = _var_by_code(meta, var_code)
+    if not var:
+        return {}
+
+    values = [str(x) for x in var.get("values", [])]
+    texts = [str(x) for x in var.get("valueTexts", [])]
+
+    return dict(zip(values, texts))
+
+
+def _pick_electricity_content_value(meta: dict, var_code: str | None) -> str | None:
+    var = _var_by_code(meta, var_code)
+    if not var:
+        return None
+
+    values = [str(x) for x in var.get("values", [])]
+    texts = [str(x) for x in var.get("valueTexts", [])]
+
+    for val, txt in zip(values, texts):
+        combined = _norm(f"{val} {txt}")
+        if "gwh" in combined or "gigawattitunti" in combined:
+            return val
+
+    for val, txt in zip(values, texts):
+        combined = _norm(f"{val} {txt}")
+        if "maara" in combined or "määrä" in combined:
+            return val
+
+    return values[0] if values else None
+
+
 def _norm(s: str) -> str:
     return str(s).lower().replace("ä", "a").replace("ö", "o").replace("å", "a")
 
@@ -249,16 +281,19 @@ def fetch_electricity_production_consumption(
 
     time_code = _find_var_code(meta, ["kuukausi", "timeperiod", "time"])
     series_code = _find_var_code(meta, ["sähkön tuotanto", "sahkon tuotanto", "hankinta", "electricity"])
+    content_code = _find_var_code(meta, ["tiedot", "contentscode", "contentcode"])
 
     if not time_code or not series_code:
         raise RuntimeError(
             "Sähkötilaston muuttujakoodeja ei löytynyt.\n\n"
             f"time_code={time_code}\n"
-            f"series_code={series_code}"
+            f"series_code={series_code}\n"
+            f"content_code={content_code}"
         )
 
     time_values = _latest_month_values(meta, time_code, start_year, end_year)
     series_values = _pick_existing_values(meta, series_code, ELECTRICITY_SERIES_VALUES)
+    content_value = _pick_electricity_content_value(meta, content_code)
 
     if not time_values or not series_values:
         raise RuntimeError(
@@ -267,25 +302,45 @@ def fetch_electricity_production_consumption(
             f"series_values={series_values}"
         )
 
+    query_items = [
+        {
+            "code": time_code,
+            "selection": {"filter": "item", "values": time_values},
+        },
+        {
+            "code": series_code,
+            "selection": {"filter": "item", "values": series_values},
+        },
+    ]
+
+    if content_code and content_value:
+        query_items.append(
+            {
+                "code": content_code,
+                "selection": {"filter": "item", "values": [content_value]},
+            }
+        )
+
     query = {
-        "query": [
-            {
-                "code": time_code,
-                "selection": {"filter": "item", "values": time_values},
-            },
-            {
-                "code": series_code,
-                "selection": {"filter": "item", "values": series_values},
-            },
-        ],
+        "query": query_items,
         "response": {"format": "json-stat2"},
     }
 
     df = _post_px(ELECTRICITY_URL, query)
     df = add_time_columns(df)
 
+    series_labels = _label_map(meta, series_code)
+
     if series_code in df.columns:
-        df = df.rename(columns={series_code: "Sähkön tuotanto/hankinta"})
+        df["Sähkön tuotanto/hankinta"] = (
+            df[series_code]
+            .astype(str)
+            .map(lambda x: series_labels.get(x, x))
+        )
+        df = df.drop(columns=[series_code], errors="ignore")
+
+    if content_code and content_code in df.columns:
+        df = df.rename(columns={content_code: "Tiedot"})
 
     return df
 

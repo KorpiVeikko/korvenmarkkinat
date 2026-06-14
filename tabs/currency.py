@@ -5,11 +5,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from services.currency_data import (
-    CURRENCY_META,
-    fetch_currency_bundle,
-    fetch_ecb_fx_series,
-)
+
 from services.currency_utils import (
     ANCHOR_CURRENCY,
     build_fx_metrics,
@@ -23,6 +19,7 @@ from services.currency_view_helpers import (
     macro_currency_format_func,
     render_money_macro_tab,
     render_overview_tab,
+    render_currency_analysis_tab,
 )
 
 from services.currency_data import (
@@ -45,10 +42,12 @@ def load_currency_bundle(currency: str, years: int = 10) -> dict:
 
 @st.cache_data(ttl=60 * 60 * 24 * 7, show_spinner="Ladataan rahamäärä- ja makrodataa…")
 def load_money_macro_bundle(currency: str, years: int = 10) -> dict:
+    fx = fetch_ecb_fx_series(currency, years=years)
     money, money_debug = fetch_money_supply_panel(currency, years=years)
     macro, macro_debug = fetch_macro_context_panel(currency, years=years)
 
     return {
+        "fx": fx,
         "money": money,
         "macro": macro,
         "debug": {
@@ -161,7 +160,7 @@ def render() -> None:
 
     view = st.radio(
         "Valitse näkymä",
-        ["📋 Yleiskuva valuutoista", "📈 Kurssikehitys", "🏦 Rahamäärä & makro"],
+        ["📋 Yleiskuva valuutoista", "📈 Kurssikehitys", "🏦 Rahamäärä & makro", "🧠 Analyysi"],
         horizontal=True,
         label_visibility="collapsed",
         key="currency_view",
@@ -199,6 +198,12 @@ def render() -> None:
 
         render_money_macro_tab(
             money_currency=money_currency,
+            years=years,
+            load_currency_bundle=load_money_macro_bundle,
+        )
+
+    elif view == "🧠 Analyysi":
+        render_currency_analysis_tab(
             years=years,
             load_currency_bundle=load_money_macro_bundle,
         )

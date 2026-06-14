@@ -26,6 +26,139 @@ from services.currency_utils import (
 DISPLAY_START_DATE = pd.Timestamp("2000-01-01")
 
 
+def _analysis_snapshot(currency: str, years: int, load_currency_bundle) -> dict:
+    bundle = load_currency_bundle(currency, years=years)
+
+    comparison_anchor = "EUR" if currency == ANCHOR_CURRENCY else ANCHOR_CURRENCY
+    anchor_bundle = load_currency_bundle(comparison_anchor, years=years)
+
+    fx = to_anchor_fx(
+        bundle.get("fx", pd.DataFrame()),
+        anchor_bundle.get("fx", pd.DataFrame()),
+    )
+    fx_metrics = build_fx_metrics(fx)
+
+    money = bundle.get("money", pd.DataFrame())
+    macro = bundle.get("macro", pd.DataFrame())
+
+    money_metrics = change_metrics(money, "Date", "BroadMoney_LCU")
+
+    inflation, _ = _latest_non_null(macro, "InflationCPI_Pct")
+    policy_rate, _ = _latest_non_null(macro, "PolicyRate_Pct")
+    real_rate, _ = _latest_non_null(macro, "RealInterestRate_Pct")
+
+    return {
+        "currency": currency,
+        "anchor": comparison_anchor,
+        "fx_metrics": fx_metrics,
+        "money": money,
+        "macro": macro,
+        "money_1y": money_metrics.change_1y_pct,
+        "money_5y": money_metrics.change_5y_pct,
+        "inflation": inflation,
+        "policy_rate": policy_rate,
+        "real_rate": real_rate,
+        "fx_1y": fx_metrics.change_1y_pct,
+        "fx_vol": fx_metrics.volatility_1y_pct,
+    }
+
+
+def _score_currency_snapshot(s: dict) -> int:
+    score = 0
+
+    if s.get("fx_1y") is not None and s["fx_1y"] < 3:
+        score += 1
+
+    if s.get("fx_vol") is not None and s["fx_vol"] < 8:
+        score += 1
+
+    if s.get("money_1y") is not None and s["money_1y"] < 6:
+        score += 1
+
+    if s.get("inflation") is not None and 0 < s["inflation"] < 3:
+        score += 1
+
+    if s.get("real_rate") is not None and s["real_rate"] > 0:
+        score += 1
+
+    return score
+
+
+def _render_currency_comparison_table(rows: list[dict]) -> None:
+    table = pd.DataFrame(
+        [
+            {
+                "Valuutta": r["currency"],
+                "FX 1v %": r["fx_1y"],
+                "Volatiliteetti 1v %": r["fx_vol"],
+                "Rahamäärä 1v %": r["money_1y"],
+                "Rahamäärä 5v %": r["money_5y"],
+                "Inflaatio %": r["inflation"],
+                "Ohjauskorko %": r["policy_rate"],
+                "Reaalikorko %": r["real_rate"],
+                "Pisteet": f"{_score_currency_snapshot(r)} / 5",
+            }
+            for r in rows
+        ]
+    )
+
+    st.markdown("### 📊 USD–EUR vertailutaulukko")
+
+    styled = (
+        table.style.format(
+            {
+                "FX 1v %": "{:+.1f}",
+                "Volatiliteetti 1v %": "{:.1f}",
+                "Rahamäärä 1v %": "{:+.1f}",
+                "Rahamäärä 5v %": "{:+.1f}",
+                "Inflaatio %": "{:+.1f}",
+                "Ohjauskorko %": "{:+.1f}",
+                "Reaalikorko %": "{:+.1f}",
+            },
+            na_rep="—",
+        )
+    )
+
+    st.dataframe(styled, width="stretch", hide_index=True)
+
+
+def _render_usd_eur_interpretation(usd: dict, eur: dict) -> None:
+    st.markdown("### 🧭 Tulkinta")
+
+    usd_score = _score_currency_snapshot(usd)
+    eur_score = _score_currency_snapshot(eur)
+
+    points = []
+
+    if usd_score > eur_score:
+        points.append(f"USD saa kokonaispisteissä paremman lukeman ({usd_score}/5 vs. {eur_score}/5).")
+    elif eur_score > usd_score:
+        points.append(f"EUR saa kokonaispisteissä paremman lukeman ({eur_score}/5 vs. {usd_score}/5).")
+    else:
+        points.append(f"USD ja EUR ovat kokonaispisteissä tasoissa ({usd_score}/5).")
+
+    if usd.get("real_rate") is not None and eur.get("real_rate") is not None:
+        if usd["real_rate"] > eur["real_rate"]:
+            points.append("USD:n reaalikorko on euroa korkeampi, mikä tukee dollaria korkoeron näkökulmasta.")
+        elif eur["real_rate"] > usd["real_rate"]:
+            points.append("EUR:n reaalikorko on dollaria korkeampi, mikä tukee euroa korkoeron näkökulmasta.")
+
+    if usd.get("inflation") is not None and eur.get("inflation") is not None:
+        if usd["inflation"] < eur["inflation"]:
+            points.append("Yhdysvaltain inflaatio on matalampi kuin euroalueen, mikä on dollarille suhteellinen vahvuus.")
+        elif eur["inflation"] < usd["inflation"]:
+            points.append("Euroalueen inflaatio on matalampi kuin Yhdysvaltain, mikä on eurolle suhteellinen vahvuus.")
+
+    if usd.get("money_1y") is not None and eur.get("money_1y") is not None:
+        if usd["money_1y"] < eur["money_1y"]:
+            points.append("USD:n rahamäärän kasvu on maltillisempaa kuin EUR:n.")
+        elif eur["money_1y"] < usd["money_1y"]:
+            points.append("EUR:n rahamäärän kasvu on maltillisempaa kuin USD:n.")
+
+    with st.container(border=True):
+        for p in points:
+            st.write(f"• {p}")
+
 def _show_debug(title: str, message: str | None) -> None:
     if not message:
         return
@@ -99,6 +232,105 @@ def _render_money_macro_analysis(
         st.markdown(f"**{currency}: rahamäärän, inflaation ja korkojen tilanne**")
         for p in points:
             st.write(f"• {p}")
+
+
+def render_currency_health_card(
+    currency: str,
+    fx_metrics,
+    money_df: pd.DataFrame,
+    macro_df: pd.DataFrame,
+) -> None:
+    score = 0
+    max_score = 5
+    positives = []
+    risks = []
+
+    if fx_metrics.change_1y_pct is not None:
+        if fx_metrics.change_1y_pct < -3:
+            score += 1
+            positives.append("Valuutta on vahvistunut suhteessa USD:hen.")
+        elif fx_metrics.change_1y_pct > 3:
+            risks.append("Valuutta on heikentynyt suhteessa USD:hen.")
+
+    if fx_metrics.volatility_1y_pct is not None:
+        if fx_metrics.volatility_1y_pct < 8:
+            score += 1
+            positives.append("Kurssivaihtelu on ollut rauhallista.")
+        elif fx_metrics.volatility_1y_pct > 12:
+            risks.append("Kurssivaihtelu on ollut voimakasta.")
+
+    money_growth = None
+    if money_df is not None and not money_df.empty and "BroadMoney_GrowthPct" in money_df.columns:
+        m = money_df.dropna(subset=["BroadMoney_GrowthPct"]).sort_values("Date")
+        if not m.empty:
+            money_growth = float(m.iloc[-1]["BroadMoney_GrowthPct"])
+
+            if money_growth < 6:
+                score += 1
+                positives.append("Rahamäärän kasvu on maltillista.")
+            elif money_growth > 10:
+                risks.append("Rahamäärä kasvaa nopeasti.")
+
+    inflation = None
+    real_rate = None
+
+    if macro_df is not None and not macro_df.empty:
+        inflation, _ = _latest_non_null(macro_df, "InflationCPI_Pct")
+        real_rate, _ = _latest_non_null(macro_df, "RealInterestRate_Pct")
+
+        if inflation is not None:
+            if 0 < inflation < 3:
+                score += 1
+                positives.append("Inflaatio on hallinnassa.")
+            elif inflation > 5:
+                risks.append("Inflaatio on korkealla.")
+
+        if real_rate is not None:
+            if real_rate > 0:
+                score += 1
+                positives.append("Reaalikorko on positiivinen.")
+            elif real_rate < -1:
+                risks.append("Reaalikorko on selvästi negatiivinen.")
+
+    if score >= 4:
+        icon, status = "🟢", "Vahva"
+    elif score >= 2:
+        icon, status = "🟡", "Neutraali / seurattava"
+    else:
+        icon, status = "🔴", "Paineessa"
+
+    st.markdown("### 🧭 Valuutan terveysmittari")
+
+    with st.container(border=True):
+        st.markdown(f"## {icon} {currency}")
+        st.markdown(f"**Tila:** {status}")
+        st.metric("Pisteet", f"{score} / {max_score}")
+
+        c1, c2, c3 = st.columns(3)
+
+        with c1:
+            st.caption("Kurssi")
+            st.write(f"1 v: {fmt_pct(fx_metrics.change_1y_pct)}")
+            st.write(f"Volatiliteetti: {fmt_pct(fx_metrics.volatility_1y_pct)}")
+
+        with c2:
+            st.caption("Raha ja hinnat")
+            st.write(f"Rahamäärä: {fmt_pct(money_growth)}")
+            st.write(f"Inflaatio: {fmt_pct(inflation)}")
+
+        with c3:
+            st.caption("Korko")
+            st.write(f"Reaalikorko: {fmt_pct(real_rate)}")
+
+        if positives:
+            st.markdown("**Vahvuudet**")
+            for item in positives[:4]:
+                st.write(f"• {item}")
+
+        if risks:
+            st.markdown("**Riskit**")
+            for item in risks[:4]:
+                st.write(f"• {item}")
 
 
 def render_overview_tab(overview: pd.DataFrame) -> None:
@@ -256,6 +488,8 @@ def render_money_macro_tab(
 
     money_metrics = change_metrics(money, "Date", "BroadMoney_LCU")
 
+    
+
     if money is None or money.empty:
         st.info("Rahamäärädataa ei saatu tälle valuutalle.")
         _show_debug("Rahamäärädatan debug", debug.get("money"))
@@ -371,6 +605,46 @@ def render_money_macro_tab(
 
     _show_debug("Makrodatan huomautus", debug.get("macro"))
 
+
+def render_currency_analysis_tab(
+    years: int,
+    load_currency_bundle,
+) -> None:
+    st.markdown("### 🧠 Valuutta-analyysi")
+    st.caption(
+        "Analyysi vertailee USD:n ja EUR:n tilannetta valuuttakurssin, rahamäärän, inflaation ja korkotason perusteella."
+    )
+
+    usd = _analysis_snapshot("USD", years, load_currency_bundle)
+    eur = _analysis_snapshot("EUR", years, load_currency_bundle)
+
+    st.markdown("### 🧭 Valuuttojen terveysmittarit")
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        render_currency_health_card(
+            currency="USD / EUR",
+            fx_metrics=usd["fx_metrics"],
+            money_df=usd["money"],
+            macro_df=usd["macro"],
+        )
+
+    with c2:
+        render_currency_health_card(
+            currency="EUR / USD",
+            fx_metrics=eur["fx_metrics"],
+            money_df=eur["money"],
+            macro_df=eur["macro"],
+        )
+
+    st.divider()
+
+    _render_currency_comparison_table([usd, eur])
+
+    st.divider()
+
+    _render_usd_eur_interpretation(usd, eur)
 
 
 def currency_format_func(code: str) -> str:

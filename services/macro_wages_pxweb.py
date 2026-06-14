@@ -15,6 +15,19 @@ ATI_Q_URL = "https://pxdata.stat.fi/PxWeb/api/v1/fi/StatFin/ati/14um.px"
 ATI_WAGES_Q_URL = "https://pxdata.stat.fi/PxWeb/api/v1/fi/StatFin/ati/14uv.px"
 
 
+def _label_map(meta: dict, var_code: str | None) -> dict[str, str]:
+    if not var_code:
+        return {}
+
+    for var in meta.get("variables") or []:
+        if str(var.get("code")) == str(var_code):
+            values = [str(x) for x in var.get("values", [])]
+            texts = [str(x) for x in var.get("valueTexts", [])]
+            return dict(zip(values, texts))
+
+    return {}
+
+
 def _px_selection(value: str | None) -> dict:
     if value is None or value == "*":
         return {"filter": "all", "values": ["*"]}
@@ -94,7 +107,16 @@ def fetch_wage_level_sector_quarterly() -> pd.DataFrame:
         return pd.DataFrame()
 
     sector_col = _resolve_sector_column(df, sector_code)
-    df["Sector"] = df[sector_col].astype(str) if sector_col else "Kaikki"
+    sector_labels = _label_map(meta, sector_code)
+
+    if sector_col:
+        df["Sector"] = (
+            df[sector_col]
+            .astype(str)
+            .map(lambda x: sector_labels.get(x, x))
+        )
+    else:
+        df["Sector"] = "Kaikki"
     df["wage_eur"] = pd.to_numeric(df["Arvo"], errors="coerce")
 
     return (
@@ -153,7 +175,16 @@ def fetch_wage_index_sector_quarterly() -> pd.DataFrame:
             continue
 
         sector_col = _resolve_sector_column(df, sector_code)
-        df["Sector"] = df[sector_col].astype(str) if sector_col else "Kaikki"
+        sector_labels = _label_map(meta, sector_code)
+
+        if sector_col:
+            df["Sector"] = (
+                df[sector_col]
+                .astype(str)
+                .map(lambda x: sector_labels.get(x, x))
+            )
+        else:
+            df["Sector"] = "Kaikki"
         df[out_name] = pd.to_numeric(df["Arvo"], errors="coerce")
 
         tmp = (
