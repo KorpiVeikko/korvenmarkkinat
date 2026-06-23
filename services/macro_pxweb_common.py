@@ -192,11 +192,12 @@ def add_quarter_date(df: pd.DataFrame) -> pd.DataFrame:
 
     time_col = None
     for col in out.columns:
-        c = str(col).lower()
+        c = str(col).strip().lower()
         if (
             "vuosineljännes" in c
             or "vuosineljannes" in c
             or "quarter" in c
+            or "timeperiod_q" in c
             or c == "aika"
             or c == "time"
         ):
@@ -204,11 +205,21 @@ def add_quarter_date(df: pd.DataFrame) -> pd.DataFrame:
             break
 
     if time_col is None:
-        time_col = out.columns[0]
+        return pd.DataFrame()
 
     q = out[time_col].astype(str).str.extract(r"(\d{4}Q[1-4])", expand=False)
 
-    out["Date"] = pd.PeriodIndex(q, freq="Q").to_timestamp(how="start")
+    out["Date"] = pd.PeriodIndex(q.dropna(), freq="Q").to_timestamp(how="start")
+
+    # Kohdistetaan takaisin alkuperäiseen indeksiin
+    out["Date"] = pd.to_datetime(
+        out[time_col]
+        .astype(str)
+        .str.extract(r"(\d{4}Q[1-4])", expand=False)
+        .map(lambda x: pd.Period(x, freq="Q").to_timestamp(how="start") if pd.notna(x) else pd.NaT),
+        errors="coerce",
+    )
+
     out = out.dropna(subset=["Date"]).copy()
 
     return out
