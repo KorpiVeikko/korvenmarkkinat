@@ -46,7 +46,7 @@ CURRENCY_META: dict[str, dict[str, str | None]] = {
     "RUB": {"name": "Venäjän rupla", "country": "RUS"},
 }
 
-MAJOR_MACRO_CURRENCIES: list[str] = ["USD", "EUR"]
+MAJOR_MACRO_CURRENCIES: list[str] = ["USD", "EUR", "JPY", "GBP", "CHF", "CNY"]
 
 FRED_SERIES = {
     "USD_M2": "M2SL",
@@ -54,10 +54,27 @@ FRED_SERIES = {
     "USD_POLICY": "FEDFUNDS",
     "EUR_HICP": "CP0000EZ19M086NEST",
     "EUR_POLICY": "ECBDFR",
+    "FED_ASSETS": "WALCL",
+    "ECB_ASSETS": "ECBASSETSW",
+    "BOJ_ASSETS": "JPNASSETS",
+    
 }
 
 ECB_M3_DATASET = "BSI"
 ECB_M3_KEY = "M.U2.Y.V.M30.X.1.U2.2300.Z01.E"
+
+OECD_PRICES_URL = "https://sdmx.oecd.org/public/rest/data/OECD.SDD.TPS,DSD_PRICES@DF_PRICES_ALL/all"
+OECD_FINMARK_URL = "https://sdmx.oecd.org/public/rest/data/OECD.SDD.STES,DSD_STES@DF_FINMARK/all"
+OECD_MONAGG_URL = "https://sdmx.oecd.org/public/rest/data/OECD.SDD.STES,DSD_STES@DF_MONAGG/all"
+
+BOJ_API_BASE = "https://www.stat-search.boj.or.jp/api/v1"
+
+BOJ_JPY_M2_DB = "MD02"
+BOJ_JPY_M2_CODE = "MAM1NAM2M2MO"
+
+BOJ_JPY_CALL_RATE_DB = "FM01"
+BOJ_JPY_CALL_RATE_CODE = "STRDCLUCON"
+
 
 
 @dataclass
@@ -455,6 +472,756 @@ def _fetch_ecb_dataset_csv(dataset: str, key: str, start_years: int = 10) -> tup
 
     except Exception as e:
         return pd.DataFrame(columns=["Date", "Value"]), f"ECB {dataset}/{key}: haku epäonnistui: {e!r}"
+    
+
+
+def _fetch_boj_json(endpoint: str, params: dict | None = None) -> tuple[dict, str | None]:
+    url = f"{BOJ_API_BASE}/{endpoint.lstrip('/')}"
+
+    try:
+        r = _safe_get(url, params=params or {}, timeout=8)
+        return r.json(), None
+    except Exception as e:
+        return {}, f"BOJ API haku epäonnistui: {url} params={params} error={e!r}"
+
+
+
+
+def _parse_boj_date(value):
+    s = str(value).strip()
+
+    if not s or s.lower() in {"nan", "none"}:
+        return pd.NaT
+
+    if len(s) == 8 and s.isdigit():
+        return pd.to_datetime(s, format="%Y%m%d", errors="coerce")
+
+    if len(s) == 6 and s.isdigit():
+        return pd.to_datetime(s + "01", format="%Y%m%d", errors="coerce")
+
+    if len(s) == 4 and s.isdigit():
+        return pd.to_datetime(s + "1231", format="%Y%m%d", errors="coerce")
+
+    return pd.to_datetime(s, errors="coerce")
+
+
+def _clean_boj_timeseries_df(raw: pd.DataFrame, code: str) -> pd.DataFrame:
+    if raw is None or raw.empty:
+        return pd.DataFrame(columns=["Date", "Value"])
+
+    d = raw.copy()
+    d.columns = [str(c).strip() for c in d.columns]
+
+    date_col = _pick_col(
+        d,
+        [
+            "TIME_PERIOD",
+            "time_period",
+            "Time",
+            "Date",
+            "DATE",
+            "Period",
+            "PERIOD",
+        ],
+    )
+
+    if date_col is None:
+        for col in d.columns:
+            c = str(col).strip().lower()
+            if (
+                "time" in c
+                or "date" in c
+                or "period" in c
+            ) and "update" not in c:
+                date_col = col
+                break
+
+    if date_col is None:
+        return pd.DataFrame(columns=["Date", "Value"])
+
+    value_col = None
+
+    for candidate in [code, "OBS_VALUE", "obs_value", "Value", "VALUE", "value"]:
+        if candidate in d.columns:
+            value_col = candidate
+            break
+
+    if value_col is None:
+        best_col = None
+        best_count = 0
+
+        ignore = {
+            date_col,
+            "SERIES_CODE",
+            "series_code",
+            "NAME_OF_TIME_SERIES",
+            "name_of_time_series",
+            "UNIT",
+            "unit",
+            "FREQUENCY",
+            "frequency",
+            "CATEGORY",
+            "category",
+            "NOTES",
+            "notes",
+            "LAST_UPDATE",
+            "last_update",
+        }
+
+        for col in d.columns:
+            if col in ignore:
+                continue
+
+            numeric = pd.to_numeric(d[col], errors="coerce")
+            count = int(numeric.notna().sum())
+
+            if count > best_count:
+                best_count = count
+                best_col = col
+
+        value_col = best_col
+
+    if value_col is None:
+        return pd.DataFrame(columns=["Date", "Value"])
+
+    out = pd.DataFrame(
+        {
+            "Date": d[date_col].map(_parse_boj_date),
+            "Value": pd.to_numeric(d[value_col], errors="coerce"),
+        }
+    )
+
+    out = (
+        out
+        .dropna(subset=["Date", "Value"])
+        .sort_values("Date")
+        .reset_index(drop=True)
+    )
+
+    return out[["Date", "Value"]]
+
+
+def _fetch_boj_series(
+    db: str,
+    code: str,
+    years: int = 10,
+    daily: bool = False,
+) -> tuple[pd.DataFrame, str | None]:
+    start_year = date.today().year - years - 2
+    start_date = f"{start_year}0101" if daily else f"{start_year}01"
+
+    def _parse_nested_values(payload: dict) -> tuple[pd.DataFrame, str | None]:
+        rows = payload.get("RESULTSET") or payload.get("resultset") or []
+        raw = pd.DataFrame(rows)
+
+        if raw.empty:
+            return pd.DataFrame(columns=["Date", "Value"]), "BOJ RESULTSET oli tyhjä."
+
+        if "VALUES" in raw.columns and isinstance(raw.iloc[0]["VALUES"], dict):
+            values_obj = raw.iloc[0]["VALUES"]
+
+            dates = (
+                values_obj.get("SURVEY_DATES")
+                or values_obj.get("DATES")
+                or values_obj.get("DATE")
+                or []
+            )
+            values = values_obj.get("VALUES") or []
+
+            out = pd.DataFrame(
+                {
+                    "Date": [_parse_boj_date(x) for x in dates],
+                    "Value": pd.to_numeric(values, errors="coerce"),
+                }
+            )
+
+            out = (
+                out.dropna(subset=["Date", "Value"])
+                .sort_values("Date")
+                .reset_index(drop=True)
+            )
+
+            return out[["Date", "Value"]], None
+
+        out = _clean_boj_timeseries_df(raw, code)
+        if out.empty:
+            return (
+                pd.DataFrame(columns=["Date", "Value"]),
+                f"BOJ {db}/{code}: JSON-data jäi tyhjäksi. Sarakkeet={list(raw.columns)}",
+            )
+
+        return out, None
+
+    # 1) Ensisijaisesti CSV startDate-parametrilla
+    try:
+        r = _safe_get(
+            f"{BOJ_API_BASE}/getDataCode",
+            params={
+                "format": "csv",
+                "lang": "en",
+                "db": db,
+                "code": code,
+                "startDate": start_date,
+            },
+            timeout=8,
+        )
+
+        raw = pd.read_csv(StringIO(r.text))
+        out = _clean_boj_timeseries_df(raw, code)
+
+        if not out.empty:
+            return out, None
+
+    except Exception:
+        pass
+
+    # 2) JSON startDate-parametrilla
+    try:
+        payload, msg = _fetch_boj_json(
+            "getDataCode",
+            params={
+                "format": "json",
+                "lang": "en",
+                "db": db,
+                "code": code,
+                "startDate": start_date,
+            },
+        )
+
+        if not msg:
+            out, parse_msg = _parse_nested_values(payload)
+            if not out.empty:
+                return out, None
+
+    except Exception:
+        pass
+
+    # 3) BOJ FM01 / päivädata: kokeillaan ilman startDate-parametria
+    try:
+        payload, msg = _fetch_boj_json(
+            "getDataCode",
+            params={
+                "format": "json",
+                "lang": "en",
+                "db": db,
+                "code": code,
+            },
+        )
+
+        if msg:
+            return pd.DataFrame(columns=["Date", "Value"]), msg
+
+        out, parse_msg = _parse_nested_values(payload)
+
+        if out.empty:
+            return pd.DataFrame(columns=["Date", "Value"]), parse_msg
+
+        if daily:
+            cutoff = pd.Timestamp(date.today() - pd.DateOffset(years=years))
+            out = out[out["Date"] >= cutoff].copy()
+
+        return out.sort_values("Date").reset_index(drop=True), None
+
+    except Exception as e:
+        return pd.DataFrame(columns=["Date", "Value"]), f"BOJ {db}/{code}: haku epäonnistui: {e!r}"
+
+
+def _fetch_jpy_money_panel(years: int = 10) -> tuple[pd.DataFrame, str | None]:
+    m2, msg = _fetch_boj_series(
+        db=BOJ_JPY_M2_DB,
+        code=BOJ_JPY_M2_CODE,
+        years=years,
+        daily=False,
+    )
+
+    if m2.empty:
+        fallback, fallback_msg = _fetch_worldbank_money_panel("JPY", years=years)
+        return fallback, msg or fallback_msg
+
+    m2 = _to_month_end(m2)
+    m2 = m2.rename(columns={"Value": "BroadMoney_LCU"})
+
+    m2["BroadMoney_GrowthPct"] = m2["BroadMoney_LCU"].pct_change(12) * 100.0
+    m2["BroadMoney_GDPPct"] = np.nan
+    m2["Currency"] = "JPY"
+    m2["Year"] = m2["Date"].dt.year
+
+    return (
+        m2[
+            [
+                "Date",
+                "Year",
+                "BroadMoney_LCU",
+                "BroadMoney_GrowthPct",
+                "BroadMoney_GDPPct",
+                "Currency",
+            ]
+        ].copy(),
+        msg or "JPY M2: Bank of Japan MD02 / Money Stock.",
+    )
+
+
+def _fetch_jpy_macro_panel(years: int = 10) -> tuple[pd.DataFrame, str | None]:
+    wb_macro, wb_msg = _fetch_worldbank_macro_panel("JPY", years=years)
+
+    inflation = pd.DataFrame(columns=["Date", "InflationCPI_Pct"])
+
+    if wb_macro is not None and not wb_macro.empty and "InflationCPI_Pct" in wb_macro.columns:
+        inflation = (
+            wb_macro[["Date", "InflationCPI_Pct"]]
+            .dropna(subset=["Date", "InflationCPI_Pct"])
+            .copy()
+        )
+        inflation["Date"] = pd.to_datetime(inflation["Date"], errors="coerce")
+        inflation = inflation.dropna(subset=["Date"]).sort_values("Date")
+
+    # BOJ FM01 antaa 400-virheen pitkällä päivähaulla.
+    # Terveyskorttia varten riittää tuore korkohavainto.
+    rate, rate_msg = _fetch_boj_series(
+        db=BOJ_JPY_CALL_RATE_DB,
+        code=BOJ_JPY_CALL_RATE_CODE,
+        years=1,
+        daily=True,
+    )
+
+    if rate.empty:
+        return (
+            wb_macro,
+            rate_msg or wb_msg or "JPY: BOJ-korkosarja jäi tyhjäksi, käytetään World Bank -fallbackia.",
+        )
+
+    rate = rate.rename(columns={"Value": "PolicyRate_Pct"})
+    rate = _to_month_end(rate)
+
+    if not inflation.empty:
+        merged = pd.merge_asof(
+            rate.sort_values("Date"),
+            inflation.sort_values("Date"),
+            on="Date",
+            direction="backward",
+        )
+    else:
+        merged = rate.copy()
+        merged["InflationCPI_Pct"] = np.nan
+
+    merged["CPI_Index"] = np.nan
+    merged["PolicyRate_Pct"] = pd.to_numeric(merged["PolicyRate_Pct"], errors="coerce")
+    merged["InflationCPI_Pct"] = pd.to_numeric(merged["InflationCPI_Pct"], errors="coerce")
+    merged["RealInterestRate_Pct"] = merged["PolicyRate_Pct"] - merged["InflationCPI_Pct"]
+    merged["Currency"] = "JPY"
+    merged["Year"] = merged["Date"].dt.year
+
+    merged = _ensure_macro_columns(merged)
+    merged = (
+        merged
+        .dropna(subset=["Date"])
+        .sort_values("Date")
+        .reset_index(drop=True)
+    )
+
+    return (
+        merged[
+            [
+                "Date",
+                "Year",
+                "CPI_Index",
+                "InflationCPI_Pct",
+                "PolicyRate_Pct",
+                "RealInterestRate_Pct",
+                "Currency",
+            ]
+        ].copy(),
+        "JPY korko: Bank of Japan FM01 / Uncollateralized Overnight Call Rate. "
+        + (wb_msg or "JPY inflaatio: World Bank fallback."),
+    )
+
+
+def _parse_oecd_period(value) -> pd.Timestamp:
+    s = str(value).strip()
+
+    if not s or s.lower() in {"nan", "none"}:
+        return pd.NaT
+
+    if "Q" in s:
+        try:
+            return pd.Period(s.replace("-Q", "Q"), freq="Q").end_time.normalize()
+        except Exception:
+            return pd.NaT
+
+    if len(s) == 7 and s[4] == "-":
+        try:
+            return pd.Period(s, freq="M").end_time.normalize()
+        except Exception:
+            return pd.NaT
+
+    if len(s) == 4 and s.isdigit():
+        return pd.to_datetime(f"{s}-12-31", errors="coerce")
+
+    return pd.to_datetime(s, errors="coerce")
+
+
+def _fetch_oecd_csv_table(url: str, start_years: int = 10) -> tuple[pd.DataFrame, str | None]:
+    start_year = date.today().year - start_years - 1
+
+    try:
+        r = _safe_get(
+            url,
+            params={
+                "startPeriod": str(start_year),
+                "dimensionAtObservation": "AllDimensions",
+                "format": "csvfilewithlabels",
+            },
+            timeout=12,
+        )
+        df = pd.read_csv(StringIO(r.text))
+        return df, None
+    except Exception as e:
+        return pd.DataFrame(), f"OECD-haku epäonnistui: {url} error={e!r}"
+
+
+def _filter_oecd_china(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    return df[
+        (df.get("REF_AREA", pd.Series(dtype=str)).astype(str) == "CHN")
+        | (
+            df.get("Reference area", pd.Series(dtype=str))
+            .astype(str)
+            .str.contains("China", case=False, na=False)
+        )
+    ].copy()
+
+
+def _fetch_cny_oecd_money_panel(years: int = 10) -> tuple[pd.DataFrame, str | None]:
+    df, msg = _fetch_oecd_csv_table(OECD_MONAGG_URL, start_years=years)
+
+    if df.empty:
+        return _empty_money_df(), msg or "CNY OECD rahamäärädata jäi tyhjäksi."
+
+    china = _filter_oecd_china(df)
+
+    rows = china[
+        (china.get("MEASURE", "").astype(str) == "MABM")
+        & (china.get("FREQ", "").astype(str) == "M")
+        & (china.get("UNIT_MEASURE", "").astype(str) == "XDC")
+    ].copy()
+
+    if rows.empty:
+        return _empty_money_df(), "CNY OECD M3 / MABM -sarjaa ei löytynyt."
+
+    rows["Date"] = rows["TIME_PERIOD"].map(_parse_oecd_period)
+    rows["BroadMoney_LCU"] = pd.to_numeric(rows["OBS_VALUE"], errors="coerce")
+
+    out = (
+        rows[["Date", "BroadMoney_LCU"]]
+        .dropna(subset=["Date", "BroadMoney_LCU"])
+        .sort_values("Date")
+        .reset_index(drop=True)
+    )
+
+    out["BroadMoney_GrowthPct"] = out["BroadMoney_LCU"].pct_change(12) * 100.0
+    out["BroadMoney_GDPPct"] = np.nan
+    out["Currency"] = "CNY"
+    out["Year"] = out["Date"].dt.year
+
+    return (
+        out[["Date", "Year", "BroadMoney_LCU", "BroadMoney_GrowthPct", "BroadMoney_GDPPct", "Currency"]].copy(),
+        "CNY rahamäärä: OECD DF_MONAGG / MABM eli M3.",
+    )
+
+
+def _fetch_cny_oecd_cpi_yoy(years: int = 10) -> tuple[pd.DataFrame, str | None]:
+    df, msg = _fetch_oecd_csv_table(OECD_PRICES_URL, start_years=years)
+
+    if df.empty:
+        return pd.DataFrame(columns=["Date", "Value"]), msg
+
+    china = _filter_oecd_china(df)
+
+    rows = china[
+        (china.get("MEASURE", "").astype(str) == "CPI")
+        & (china.get("EXPENDITURE", "").astype(str) == "_T")
+        & (china.get("TRANSFORMATION", "").astype(str) == "GY")
+        & (china.get("UNIT_MEASURE", "").astype(str) == "PA")
+    ].copy()
+
+    if rows.empty:
+        return pd.DataFrame(columns=["Date", "Value"]), "CNY OECD CPI YoY -sarjaa ei löytynyt."
+
+    rows["Date"] = rows["TIME_PERIOD"].map(_parse_oecd_period)
+    rows["Value"] = pd.to_numeric(rows["OBS_VALUE"], errors="coerce")
+
+    out = rows[["Date", "Value"]].dropna().sort_values("Date").reset_index(drop=True)
+
+    return out, "CNY inflaatio: OECD CPI vuosimuutos."
+
+
+def _fetch_cny_oecd_rate(years: int = 10, measure: str = "IR3TIB") -> tuple[pd.DataFrame, str | None]:
+    df, msg = _fetch_oecd_csv_table(OECD_FINMARK_URL, start_years=years)
+
+    if df.empty:
+        return pd.DataFrame(columns=["Date", "Value"]), msg
+
+    china = _filter_oecd_china(df)
+
+    rows = china[
+        (china.get("MEASURE", "").astype(str) == measure)
+        & (china.get("UNIT_MEASURE", "").astype(str) == "PA")
+    ].copy()
+
+    if rows.empty:
+        return pd.DataFrame(columns=["Date", "Value"]), f"CNY OECD korkosarjaa ei löytynyt: {measure}"
+
+    rows["Date"] = rows["TIME_PERIOD"].map(_parse_oecd_period)
+    rows["Value"] = pd.to_numeric(rows["OBS_VALUE"], errors="coerce")
+
+    out = rows[["Date", "Value"]].dropna().sort_values("Date").reset_index(drop=True)
+
+    return out, f"CNY korko: OECD FINMARK {measure}."
+
+
+def _fetch_cny_oecd_macro_panel(years: int = 10) -> tuple[pd.DataFrame, str | None]:
+    cpi, cpi_msg = _fetch_cny_oecd_cpi_yoy(years=years)
+    rate, rate_msg = _fetch_cny_oecd_rate(years=years, measure="IR3TIB")
+
+    debug_parts = [x for x in [cpi_msg, rate_msg] if x]
+
+    if cpi.empty and rate.empty:
+        return _empty_macro_df(), " | ".join(debug_parts)
+
+    if not cpi.empty:
+        cpi = cpi.rename(columns={"Value": "InflationCPI_Pct"})
+        cpi["CPI_Index"] = np.nan
+    else:
+        cpi = pd.DataFrame(columns=["Date", "CPI_Index", "InflationCPI_Pct"])
+
+    if not rate.empty:
+        rate = rate.rename(columns={"Value": "PolicyRate_Pct"})
+    else:
+        rate = pd.DataFrame(columns=["Date", "PolicyRate_Pct"])
+
+    if not rate.empty and not cpi.empty:
+        merged = pd.merge_asof(
+            rate.sort_values("Date"),
+            cpi[["Date", "CPI_Index", "InflationCPI_Pct"]].sort_values("Date"),
+            on="Date",
+            direction="backward",
+        )
+    elif not rate.empty:
+        merged = rate.copy()
+        merged["CPI_Index"] = np.nan
+        merged["InflationCPI_Pct"] = np.nan
+    else:
+        merged = cpi.copy()
+        merged["PolicyRate_Pct"] = np.nan
+
+    merged = _ensure_macro_columns(merged)
+
+    merged["Date"] = pd.to_datetime(merged["Date"], errors="coerce")
+    merged["InflationCPI_Pct"] = pd.to_numeric(merged["InflationCPI_Pct"], errors="coerce")
+    merged["PolicyRate_Pct"] = pd.to_numeric(merged["PolicyRate_Pct"], errors="coerce")
+    merged["RealInterestRate_Pct"] = merged["PolicyRate_Pct"] - merged["InflationCPI_Pct"]
+    merged["Currency"] = "CNY"
+    merged["Year"] = merged["Date"].dt.year
+
+    merged = merged.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
+
+    return (
+        merged[[
+            "Date",
+            "Year",
+            "CPI_Index",
+            "InflationCPI_Pct",
+            "PolicyRate_Pct",
+            "RealInterestRate_Pct",
+            "Currency",
+        ]].copy(),
+        " | ".join(debug_parts),
+    )
+
+
+
+
+
+
+WORLD_BANK_INDICATORS = {
+    "BROAD_MONEY_GROWTH": "FM.LBL.BMNY.ZG",
+    "INFLATION": "FP.CPI.TOTL.ZG",
+    "REAL_INTEREST_RATE": "FR.INR.RINR",
+    "LENDING_INTEREST_RATE": "FR.INR.LEND",
+}
+
+
+def _fetch_worldbank_indicator(
+    country: str,
+    indicator: str,
+    years: int = 10,
+) -> tuple[pd.DataFrame, str | None]:
+    url = f"https://api.worldbank.org/v2/country/{country}/indicator/{indicator}"
+
+    try:
+        r = _safe_get(
+            url,
+            params={
+                "format": "json",
+                "per_page": 20000,
+            },
+            timeout=8,
+        )
+
+        payload = r.json()
+
+        if not isinstance(payload, list) or len(payload) < 2:
+            return pd.DataFrame(columns=["Date", "Year", "Value"]), f"World Bank {country}/{indicator}: vastaus ei ollut odotettu."
+
+        rows = payload[1] or []
+
+        out = pd.DataFrame(
+            {
+                "Year": pd.to_numeric([x.get("date") for x in rows], errors="coerce"),
+                "Value": pd.to_numeric([x.get("value") for x in rows], errors="coerce"),
+            }
+        )
+
+        out = out.dropna(subset=["Year", "Value"]).copy()
+        if out.empty:
+            return pd.DataFrame(columns=["Date", "Year", "Value"]), f"World Bank {country}/{indicator}: data jäi tyhjäksi."
+
+        out["Year"] = out["Year"].astype(int)
+        min_year = date.today().year - years - 2
+        out = out[out["Year"] >= min_year].sort_values("Year").reset_index(drop=True)
+        out["Date"] = pd.to_datetime(out["Year"].astype(str) + "-12-31", errors="coerce")
+
+        return out[["Date", "Year", "Value"]], None
+
+    except Exception as e:
+        return pd.DataFrame(columns=["Date", "Year", "Value"]), f"World Bank {country}/{indicator}: haku epäonnistui: {e!r}"
+
+
+def _build_broad_money_index_from_growth(growth_df: pd.DataFrame, currency: str) -> pd.DataFrame:
+    if growth_df is None or growth_df.empty:
+        return _empty_money_df()
+
+    d = growth_df.copy()
+    d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
+    d["Year"] = pd.to_numeric(d["Year"], errors="coerce")
+    d["BroadMoney_GrowthPct"] = pd.to_numeric(d["Value"], errors="coerce")
+    d = d.dropna(subset=["Date", "Year", "BroadMoney_GrowthPct"]).sort_values("Date").reset_index(drop=True)
+
+    if d.empty:
+        return _empty_money_df()
+
+    index_values = []
+    level = 100.0
+
+    for _, row in d.iterrows():
+        growth = row["BroadMoney_GrowthPct"]
+        if pd.notna(growth):
+            level *= 1.0 + float(growth) / 100.0
+        index_values.append(level)
+
+    d["BroadMoney_LCU"] = index_values
+    d["BroadMoney_GDPPct"] = np.nan
+    d["Currency"] = currency
+
+    return d[["Date", "Year", "BroadMoney_LCU", "BroadMoney_GrowthPct", "BroadMoney_GDPPct", "Currency"]].copy()
+
+
+def _fetch_worldbank_money_panel(currency: str, years: int = 10) -> tuple[pd.DataFrame, str | None]:
+    country = CURRENCY_META.get(currency, {}).get("country")
+    if not country:
+        return _empty_money_df(), f"{currency}: World Bank -maakoodia ei löytynyt."
+
+    growth, msg = _fetch_worldbank_indicator(
+        str(country),
+        WORLD_BANK_INDICATORS["BROAD_MONEY_GROWTH"],
+        years=years,
+    )
+
+    if growth.empty:
+        return _empty_money_df(), msg or f"{currency}: broad money growth jäi tyhjäksi."
+
+    return _build_broad_money_index_from_growth(growth, currency), msg
+
+
+def _fetch_worldbank_macro_panel(currency: str, years: int = 10) -> tuple[pd.DataFrame, str | None]:
+    country = CURRENCY_META.get(currency, {}).get("country")
+    if not country:
+        return _empty_macro_df(), f"{currency}: World Bank -maakoodia ei löytynyt."
+
+    inflation, infl_msg = _fetch_worldbank_indicator(
+        str(country),
+        WORLD_BANK_INDICATORS["INFLATION"],
+        years=years,
+    )
+
+    real_rate, real_msg = _fetch_worldbank_indicator(
+        str(country),
+        WORLD_BANK_INDICATORS["REAL_INTEREST_RATE"],
+        years=years,
+    )
+
+    lending_rate, lend_msg = _fetch_worldbank_indicator(
+        str(country),
+        WORLD_BANK_INDICATORS["LENDING_INTEREST_RATE"],
+        years=years,
+    )
+
+    frames = []
+
+    if not inflation.empty:
+        frames.append(
+            inflation.rename(columns={"Value": "InflationCPI_Pct"})[
+                ["Date", "Year", "InflationCPI_Pct"]
+            ]
+        )
+
+    if not lending_rate.empty:
+        frames.append(
+            lending_rate.rename(columns={"Value": "PolicyRate_Pct"})[
+                ["Date", "Year", "PolicyRate_Pct"]
+            ]
+        )
+
+    if not real_rate.empty:
+        frames.append(
+            real_rate.rename(columns={"Value": "RealInterestRate_Pct"})[
+                ["Date", "Year", "RealInterestRate_Pct"]
+            ]
+        )
+
+    if not frames:
+        debug = " | ".join(x for x in [infl_msg, real_msg, lend_msg] if x)
+        return _empty_macro_df(), debug or f"{currency}: World Bank -makrodata jäi tyhjäksi."
+
+    out = frames[0]
+    for frame in frames[1:]:
+        out = pd.merge(out, frame, on=["Date", "Year"], how="outer")
+
+    out["CPI_Index"] = np.nan
+    out["Currency"] = currency
+
+    out = _ensure_macro_columns(out)
+    out = out.sort_values("Date").reset_index(drop=True)
+
+    debug = " | ".join(x for x in [infl_msg, real_msg, lend_msg] if x)
+
+    return (
+        out[
+            [
+                "Date",
+                "Year",
+                "CPI_Index",
+                "InflationCPI_Pct",
+                "PolicyRate_Pct",
+                "RealInterestRate_Pct",
+                "Currency",
+            ]
+        ].copy(),
+        debug or "World Bank -data on vuositasoista. PolicyRate_Pct on tässä lainakorko-proxy, ei varsinainen ohjauskorko.",
+    )
+
 
 
 def _calc_yoy_from_index(df: pd.DataFrame, value_col: str = "Value") -> pd.DataFrame:
@@ -546,7 +1313,9 @@ def fetch_money_supply_panel(currency: str, years: int = 10) -> tuple[pd.DataFra
         m2["Currency"] = currency
         m2["Year"] = m2["Date"].dt.year
 
-        return m2[["Date", "Year", "BroadMoney_LCU", "BroadMoney_GrowthPct", "BroadMoney_GDPPct", "Currency"]].copy(), msg
+        return m2[
+            ["Date", "Year", "BroadMoney_LCU", "BroadMoney_GrowthPct", "BroadMoney_GDPPct", "Currency"]
+        ].copy(), msg
 
     if currency == "EUR":
         m3, msg = _fetch_ecb_dataset_csv(ECB_M3_DATASET, ECB_M3_KEY, start_years=years)
@@ -560,9 +1329,17 @@ def fetch_money_supply_panel(currency: str, years: int = 10) -> tuple[pd.DataFra
         m3["Currency"] = currency
         m3["Year"] = m3["Date"].dt.year
 
-        return m3[["Date", "Year", "BroadMoney_LCU", "BroadMoney_GrowthPct", "BroadMoney_GDPPct", "Currency"]].copy(), msg
+        return m3[
+            ["Date", "Year", "BroadMoney_LCU", "BroadMoney_GrowthPct", "BroadMoney_GDPPct", "Currency"]
+        ].copy(), msg
 
-    return _empty_money_df(), f"{currency}: rahamäärädataa ei ole määritelty."
+    if currency == "JPY":
+        return _fetch_jpy_money_panel(years=years)
+    
+    if currency == "CNY":
+        return _fetch_cny_oecd_money_panel(years=years)
+
+    return _fetch_worldbank_money_panel(currency, years=years)
 
 
 def fetch_macro_context_panel(currency: str, years: int = 10) -> tuple[pd.DataFrame, str | None]:
@@ -597,7 +1374,86 @@ def fetch_macro_context_panel(currency: str, years: int = 10) -> tuple[pd.DataFr
             debug_parts=debug_parts,
         )
 
-    return _empty_macro_df(), f"{currency}: makrodataa ei ole määritelty."
+    if currency == "JPY":
+        return _fetch_jpy_macro_panel(years=years)
+    
+    if currency == "CNY":
+        return _fetch_cny_oecd_macro_panel(years=years)
+
+    return _fetch_worldbank_macro_panel(currency, years=years)
+
+
+CENTRAL_BANK_BALANCE_META = {
+    "FED": {
+        "name": "Federal Reserve",
+        "currency": "USD",
+        "series": "FED_ASSETS",
+        "unit": "milj. USD",
+    },
+    "ECB": {
+        "name": "Euroopan keskuspankki / Eurosystem",
+        "currency": "EUR",
+        "series": "ECB_ASSETS",
+        "unit": "milj. EUR",
+    },
+    "BOJ": {
+        "name": "Bank of Japan",
+        "currency": "JPY",
+        "series": "BOJ_ASSETS",
+        "unit": "100 milj. JPY",
+    },
+}
+
+
+def fetch_central_bank_balance_sheets(years: int = 10) -> tuple[pd.DataFrame, str | None]:
+    frames = []
+    debug_parts = []
+
+    for bank, meta in CENTRAL_BANK_BALANCE_META.items():
+        series_id = FRED_SERIES[meta["series"]]
+        df, msg = _fetch_fred_series(series_id)
+
+        if msg:
+            debug_parts.append(f"{bank}: {msg}")
+
+        if df.empty:
+            continue
+
+        out = df.copy()
+        out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+        out["Assets"] = pd.to_numeric(out["Value"], errors="coerce")
+        out = out.dropna(subset=["Date", "Assets"]).sort_values("Date")
+
+        cutoff = pd.Timestamp(date.today() - pd.DateOffset(years=years))
+        out = out[out["Date"] >= cutoff].copy()
+
+        out["CentralBank"] = bank
+        out["Name"] = meta["name"]
+        out["Currency"] = meta["currency"]
+        out["Unit"] = meta["unit"]
+
+        out["Assets_Change_1Y_Pct"] = out["Assets"].pct_change(52 if bank in {"FED", "ECB"} else 12) * 100.0
+        out["Assets_Change_5Y_Pct"] = out["Assets"].pct_change(260 if bank in {"FED", "ECB"} else 60) * 100.0
+
+        frames.append(
+            out[
+                [
+                    "Date",
+                    "CentralBank",
+                    "Name",
+                    "Currency",
+                    "Unit",
+                    "Assets",
+                    "Assets_Change_1Y_Pct",
+                    "Assets_Change_5Y_Pct",
+                ]
+            ]
+        )
+
+    if not frames:
+        return pd.DataFrame(), "Keskuspankkien tasedataa ei saatu."
+
+    return pd.concat(frames, ignore_index=True), " | ".join(debug_parts) if debug_parts else None
 
 
 def _latest_rate(history: pd.DataFrame) -> tuple[pd.Timestamp | None, float | None]:

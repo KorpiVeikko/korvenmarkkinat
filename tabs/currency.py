@@ -28,6 +28,7 @@ from services.currency_data import (
     fetch_ecb_fx_series,
     fetch_money_supply_panel,
     fetch_macro_context_panel,
+    fetch_central_bank_balance_sheets,
 )
 
 
@@ -87,6 +88,11 @@ def load_currency_overview_anchor(years: int = 10) -> pd.DataFrame:
         )
 
     return pd.DataFrame(rows)
+
+@st.cache_data(ttl=60 * 60 * 24, show_spinner="Ladataan keskuspankkien taseita…")
+def load_central_bank_balance_sheets(years: int = 10) -> dict:
+    df, debug = fetch_central_bank_balance_sheets(years=years)
+    return {"data": df, "debug": debug}
 
 
 
@@ -160,7 +166,7 @@ def render() -> None:
 
     view = st.radio(
         "Valitse näkymä",
-        ["📋 Yleiskuva valuutoista", "📈 Kurssikehitys", "🏦 Rahamäärä & makro", "🧠 Analyysi"],
+        ["📋 Yleiskuva valuutoista", "📈 Kurssikehitys", "💰 Rahamäärä & makro", "🏛️ Keskuspankkien taseet", "🧠 Analyysi"],
         horizontal=True,
         label_visibility="collapsed",
         key="currency_view",
@@ -185,7 +191,7 @@ def render() -> None:
 
         render_fx_tab_fast(fx_currency=fx_currency, years=years)
 
-    elif view == "🏦 Rahamäärä & makro":
+    elif view == "💰 Rahamäärä & makro":
         st.markdown("### 🏦 Rahamäärä & makro")
 
         money_currency = st.selectbox(
@@ -201,9 +207,77 @@ def render() -> None:
             years=years,
             load_currency_bundle=load_money_macro_bundle,
         )
+    elif view == "🏛️ Keskuspankkien taseet":
+        st.markdown("### 🏛️ Keskuspankkien taseet")
+
+        with st.expander("Mitä keskuspankin tase tarkoittaa ja miten sitä tulkitaan?", expanded=False):
+            st.write(
+                "Keskuspankin tase kuvaa keskuspankin varoja ja velkoja. "
+                "Taseen varoihin voi kuulua esimerkiksi valtionlainoja, pankkijärjestelmälle annettuja lainoja, "
+                "valuuttavarantoja ja muita rahapolitiikan välineitä. Velkapuolella näkyvät esimerkiksi "
+                "liikkeessä oleva keskuspankkiraha ja pankkien talletukset keskuspankissa."
+            )
+            st.write(
+                "Kun keskuspankin tase kasvaa, se kertoo usein siitä, että keskuspankki lisää likviditeettiä "
+                "rahoitusjärjestelmään esimerkiksi arvopaperiostoilla, lainoituksella tai valuuttainterventioilla. "
+                "Kun tase supistuu, keskuspankki yleensä kiristää tai normalisoi rahapolitiikkaa."
+            )
+            st.write(
+                "Taseita ei kannata verrata suoraan nimellistasoina eri valuuttojen välillä, koska sarjat ovat eri valuutoissa "
+                "ja eri yksiköissä. Ensimmäisessä vaiheessa tärkeintä on katsoa kunkin keskuspankin oman taseen suuntaa: "
+                "kasvaako vai supistuuko tase, ja kuinka nopeasti."
+            )
+
+        bundle = load_central_bank_balance_sheets(years=years)
+        df = bundle["data"]
+
+        if df is None or df.empty:
+            st.warning("Keskuspankkien tasedataa ei saatu.")
+            return
+
+        latest = (
+            df.sort_values("Date")
+            .groupby("CentralBank", as_index=False)
+            .tail(1)
+            .sort_values("CentralBank")
+        )
+
+        c1, c2, c3 = st.columns(3)
+
+        for col, (_, row) in zip([c1, c2, c3], latest.iterrows()):
+            with col:
+                st.metric(
+                    row["Name"],
+                    f"{row['Assets']:,.0f}",
+                    f"{row['Assets_Change_1Y_Pct']:+.1f} % (1v)"
+                    if pd.notna(row["Assets_Change_1Y_Pct"])
+                    else None,
+                )
+                st.caption(f"{row['Unit']} | {pd.to_datetime(row['Date']).date()}")
+
+        st.divider()
+
+        fig = px.line(
+            df,
+            x="Date",
+            y="Assets",
+            color="CentralBank",
+            title="Keskuspankkien taseet",
+            labels={"Date": "Päivä", "Assets": "Tase", "CentralBank": "Keskuspankki"},
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        with st.expander("Huomautus yksiköistä", expanded=False):
+            st.write(
+                "Sarjat ovat alkuperäisissä valuutoissaan ja eri yksiköissä. "
+                "Fed on miljoonina dollareina, EKP miljoonina euroina ja BOJ 100 miljoonina jeneinä. "
+                "Siksi tasoja ei pidä vielä verrata suoraan toisiinsa; tässä vaiheessa tärkeintä on kunkin keskuspankin oman taseen suunta."
+            )
 
     elif view == "🧠 Analyysi":
+
         render_currency_analysis_tab(
             years=years,
             load_currency_bundle=load_money_macro_bundle,
+            load_fx_series=load_fx_series,
         )
