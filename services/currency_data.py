@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from io import StringIO
+from io import StringIO, BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +14,8 @@ import os
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from dotenv import load_dotenv
+from urllib.parse import urljoin
+import re
 
 load_dotenv()
 
@@ -43,10 +45,9 @@ CURRENCY_META: dict[str, dict[str, str | None]] = {
     "SEK": {"name": "Ruotsin kruunu", "country": "SWE"},
     "NOK": {"name": "Norjan kruunu", "country": "NOR"},
     "INR": {"name": "Intian rupia", "country": "IND"},
-    "RUB": {"name": "Venäjän rupla", "country": "RUS"},
 }
 
-MAJOR_MACRO_CURRENCIES: list[str] = ["USD", "EUR", "JPY", "GBP", "CHF", "CNY"]
+MAJOR_MACRO_CURRENCIES: list[str] = ["USD", "EUR", "JPY", "CNY"]
 
 FRED_SERIES = {
     "USD_M2": "M2SL",
@@ -780,7 +781,7 @@ def _fetch_jpy_macro_panel(years: int = 10) -> tuple[pd.DataFrame, str | None]:
     rate, rate_msg = _fetch_boj_series(
         db=BOJ_JPY_CALL_RATE_DB,
         code=BOJ_JPY_CALL_RATE_CODE,
-        years=1,
+        years=years,
         daily=True,
     )
 
@@ -1255,6 +1256,7 @@ def _to_month_end(df: pd.DataFrame, date_col: str = "Date") -> pd.DataFrame:
     return d
 
 
+
 def fetch_ecb_fx_series(currency: str, years: int = 10) -> pd.DataFrame:
     if currency == "EUR":
         return _synthetic_eur_series(years=years)
@@ -1432,8 +1434,11 @@ def fetch_central_bank_balance_sheets(years: int = 10) -> tuple[pd.DataFrame, st
         out["Currency"] = meta["currency"]
         out["Unit"] = meta["unit"]
 
-        out["Assets_Change_1Y_Pct"] = out["Assets"].pct_change(52 if bank in {"FED", "ECB"} else 12) * 100.0
-        out["Assets_Change_5Y_Pct"] = out["Assets"].pct_change(260 if bank in {"FED", "ECB"} else 60) * 100.0
+        periods_1y = 52 if bank in {"FED", "ECB"} else 12
+        periods_5y = 260 if bank in {"FED", "ECB"} else 60
+
+        out["Assets_Change_1Y_Pct"] = out["Assets"].pct_change(periods_1y) * 100.0
+        out["Assets_Change_5Y_Pct"] = out["Assets"].pct_change(periods_5y) * 100.0
 
         frames.append(
             out[
@@ -1450,8 +1455,10 @@ def fetch_central_bank_balance_sheets(years: int = 10) -> tuple[pd.DataFrame, st
             ]
         )
 
+    # PBOC lisätään FRED-silmukan jälkeen, ei sen sisällä.
+    
     if not frames:
-        return pd.DataFrame(), "Keskuspankkien tasedataa ei saatu."
+        return pd.DataFrame(), " | ".join(debug_parts) if debug_parts else "Keskuspankkien tasedataa ei saatu."
 
     return pd.concat(frames, ignore_index=True), " | ".join(debug_parts) if debug_parts else None
 

@@ -196,6 +196,8 @@ def _render_analysis(
     drawdown_from_ath: float | None,
     vol30: float | None,
     ma200_latest: float | None,
+    vol_now: float | None,
+    vol_30avg: float | None,
 ) -> None:
     now = btc_vals.get("now")
     pct_1m = btc_vals.get("pct_1m")
@@ -236,6 +238,16 @@ def _render_analysis(
             parts.append("Volatiliteetti on korkea, joten lyhyen aikavälin heilunta voi olla voimakasta.")
         elif vol30 < 45:
             parts.append("Volatiliteetti on bitcoinille verrattain rauhallinen.")
+
+    if vol_now is not None and vol_30avg is not None and vol_30avg != 0:
+        vol_diff = (vol_now / vol_30avg - 1.0) * 100.0
+
+        if vol_diff > 30:
+            parts.append("Kaupankäyntivolyymi on selvästi 30 päivän keskiarvoa korkeampi, mikä kertoo markkinakiinnostuksen tai myynti-/ostopaineen kasvusta.")
+        elif vol_diff < -30:
+            parts.append("Kaupankäyntivolyymi on selvästi 30 päivän keskiarvoa matalampi, mikä voi viitata vaisumpaan markkina-aktiivisuuteen.")
+        else:
+            parts.append("Kaupankäyntivolyymi on melko lähellä 30 päivän keskiarvoa.")
 
     if not parts:
         parts.append("Analyysia ei voitu muodostaa, koska keskeisiä tunnuslukuja puuttuu.")
@@ -302,82 +314,48 @@ def render() -> None:
 
     st.markdown("### 💶 Hinta euroissa")
 
-    c1, c2, c3, c4 = st.columns(4)
+    left, _ = st.columns([0.42, 0.58])
 
-    with c1:
-        _price_card("Nyt", btc_vals["now"])
-    with c2:
-        _price_card("1 kk sitten", btc_vals["1m"], btc_vals["pct_1m"])
-    with c3:
-        _price_card("1 v sitten", btc_vals["1y"], btc_vals["pct_1y"])
-    with c4:
-        _price_card("5 v sitten", btc_vals["5y"], btc_vals["pct_5y"])
+    with left:
+        with st.container(border=True):
+            st.markdown("### ₿ Bitcoin")
+            st.caption("Nykyinen hinta")
+            st.markdown(f"# {_fmt_money(btc_vals['now'], '€', 0)}")
+
+            st.divider()
+
+            for label, pct in [
+                ("1 kk", btc_vals.get("pct_1m")),
+                ("1 vuosi", btc_vals.get("pct_1y")),
+                ("5 vuotta", btc_vals.get("pct_5y")),
+            ]:
+                icon = "↗" if pct is not None and pct >= 0 else "↘"
+                color = "#15803d" if pct is not None and pct >= 0 else "#b91c1c"
+
+                st.markdown(
+                    f"""
+                    <div style="
+                        display:flex;
+                        justify-content:space-between;
+                        align-items:center;
+                        padding:0.45rem 0;
+                        border-bottom:1px solid #e5e7eb;
+                    ">
+                        <span style="color:#6b7280;">{icon} {label}</span>
+                        <span style="color:{color}; font-weight:700;">{_pct_text(pct)}</span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
     st.divider()
 
-    _render_signal_cards(
-        btc_vals=btc_vals,
-        drawdown_from_ath=drawdown_from_ath,
-        vol30=vol30,
-        ma200_latest=ma200_latest,
+
+    tab_price, tab_drawdown, tab_volume, tab_analysis = st.tabs(
+        ["💹 Hinta", "📉 Drawdown", "📦 Volyymi", "🧠 Analyysi"]
     )
 
-    st.divider()
-
-    st.markdown("### 📊 Tunnusluvut")
-
-    k1, k2, k3, k4 = st.columns(4)
-
-    with k1:
-        with st.container(border=True):
-            st.metric("ATH", _fmt_money(ath_eur, "€", 0))
-            st.caption(_fmt_money(ath_usd, "$", 0))
-
-    with k2:
-        with st.container(border=True):
-            st.metric("ATL", _fmt_money(atl_eur, "€", 0))
-            st.caption(_fmt_money(atl_usd, "$", 0))
-
-    with k3:
-        with st.container(border=True):
-            st.metric(
-                "ATH-drawdown",
-                f"{drawdown_from_ath:+.1f} %" if drawdown_from_ath is not None else "—",
-            )
-            st.caption("Nykyhinta vs kaikkien aikojen huippu")
-
-    with k4:
-        with st.container(border=True):
-            st.metric("30 pv volatiliteetti", f"{vol30:.1f} %" if vol30 is not None else "—")
-            st.caption("Annualisoitu")
-
-    if vol_now is not None or vol_30avg is not None:
-        v1, v2 = st.columns(2)
-
-        with v1:
-            with st.container(border=True):
-                st.metric("Volyymi nyt", _fmt_money(vol_now, "", 0).strip())
-                st.caption("Yahoo Finance volume")
-
-        with v2:
-            with st.container(border=True):
-                st.metric("Volyymi, 30 pv ka", _fmt_money(vol_30avg, "", 0).strip())
-                st.caption("Keskiarvo")
-
-    st.divider()
-
-    tab_analysis, tab_price, tab_drawdown, tab_volume = st.tabs(
-        ["🧠 Analyysi", "💹 Hinta", "📉 Drawdown", "📦 Volyymi"]
-    )
-
-    with tab_analysis:
-        _render_analysis(
-            btc_vals=btc_vals,
-            drawdown_from_ath=drawdown_from_ath,
-            vol30=vol30,
-            ma200_latest=ma200_latest,
-        )
-
+    
     with tab_price:
         render_price_chart_with_extra_lines(
             plot_df,
@@ -393,7 +371,31 @@ def render() -> None:
             postprocess=_add_halving_lines,
         )
 
+   
+
     with tab_drawdown:
+        st.markdown("### 📉 Drawdown")
+
+        c1, c2, c3 = st.columns(3)
+
+        with c1:
+            _price_card("ATH", ath_eur, None)
+            st.caption(_fmt_money(ath_usd, "$", 0))
+
+        with c2:
+            _price_card("ATL", atl_eur, None)
+            st.caption(_fmt_money(atl_usd, "$", 0))
+
+        with c3:
+            with st.container(border=True):
+                st.caption("ATH-drawdown")
+                st.markdown(
+                    f"## {drawdown_from_ath:+.1f} %"
+                    if drawdown_from_ath is not None
+                    else "## —"
+                )
+                st.caption("Nykyhinta vs kaikkien aikojen huippu")
+
         period = period_selector(
             "Kuvaajan tarkasteluväli",
             key="btc_dd_period",
@@ -423,6 +425,22 @@ def render() -> None:
         st.plotly_chart(fig, use_container_width=True)
 
     with tab_volume:
+        st.markdown("### 📦 Volyymi")
+
+        v1, v2 = st.columns(2)
+
+        with v1:
+            with st.container(border=True):
+                st.caption("Volyymi nyt")
+                st.markdown(f"## {_fmt_money(vol_now, '', 0).strip()}")
+                st.caption("Yahoo Finance volume")
+
+        with v2:
+            with st.container(border=True):
+                st.caption("Volyymi, 30 pv ka")
+                st.markdown(f"## {_fmt_money(vol_30avg, '', 0).strip()}")
+                st.caption("Keskiarvo")
+
         period = period_selector(
             "Kuvaajan tarkasteluväli",
             key="btc_vol_period",
@@ -451,3 +469,23 @@ def render() -> None:
 
             fig.update_yaxes(ticksuffix=" mrd")
             st.plotly_chart(fig, use_container_width=True)
+
+    with tab_analysis:
+
+        _render_signal_cards(
+            btc_vals=btc_vals,
+            drawdown_from_ath=drawdown_from_ath,
+            vol30=vol30,
+            ma200_latest=ma200_latest,
+        )
+
+        st.divider()
+
+        _render_analysis(
+            btc_vals=btc_vals,
+            drawdown_from_ath=drawdown_from_ath,
+            vol30=vol30,
+            ma200_latest=ma200_latest,
+            vol_now=vol_now,
+            vol_30avg=vol_30avg,
+        )

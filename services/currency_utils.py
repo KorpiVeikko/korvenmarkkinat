@@ -21,22 +21,30 @@ def fmt_pct(x: float | None, decimals: int = 1) -> str:
     return f"{x:+.{decimals}f} %"
 
 
-def fmt_money_supply(x: float | None, currency: str = "") -> str:
-    if x is None or pd.isna(x):
+def fmt_money_supply(value: float | None, currency: str) -> str:
+    if value is None or pd.isna(value):
         return "—"
 
-    x = float(x)
+    v = float(value)
 
-    if abs(x) >= 1_000_000_000_000:
-        return f"{x / 1_000_000_000_000:,.1f}".replace(",", " ") + f" bilj. {currency}"
+    # USD (FRED M2SL): miljardia USD
+    if currency == "USD":
+        return f"{v / 1_000:.1f} bilj. USD"
 
-    if abs(x) >= 1_000_000_000:
-        return f"{x / 1_000_000_000:,.1f}".replace(",", " ") + f" mrd {currency}"
+    # EUR (ECB M3): miljoonaa EUR
+    if currency == "EUR":
+        return f"{v / 1_000_000:.1f} bilj. EUR"
 
-    if abs(x) >= 1_000_000:
-        return f"{x / 1_000_000:,.1f}".replace(",", " ") + f" milj. {currency}"
+    # JPY (BOJ): 100 miljoonaa JPY
+    if currency == "JPY":
+        return f"{v / 10_000:.1f} bilj. JPY"
 
-    return f"{x:,.0f}".replace(",", " ") + f" {currency}"
+    # CNY (OECD): miljoonaa CNY
+    # 8 600 000 -> 8.6 bilj. CNY
+    if currency == "CNY":
+        return f"{v / 1_000_000:.1f} bilj. CNY"
+
+    return f"{v:,.0f} {currency}"
 
 
 def pct_change(now: float | None, then: float | None) -> float | None:

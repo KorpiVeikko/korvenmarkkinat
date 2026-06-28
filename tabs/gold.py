@@ -42,6 +42,12 @@ def _pct_color(value: float | None) -> str:
         return "#6b7280"
     return "#15803d" if value >= 0 else "#b91c1c"
 
+def _pct_text(value: float | None, label: str = "") -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    suffix = f" ({label})" if label else ""
+    return f"{value:+.1f} %"
+
 
 def _pct_html(value: float | None, label: str = "") -> str:
     if value is None or pd.isna(value):
@@ -221,42 +227,74 @@ def render() -> None:
 
     st.markdown("### 💶 Hinnat euroissa")
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2 = st.columns(2)
+
+
+    def _metal_summary_card(
+        title: str,
+        value: float | None,
+        values: dict,
+        decimals: int,
+    ) -> None:
+        with st.container(border=True):
+            st.markdown(f"### {title}")
+            st.caption("Nykyinen hinta")
+            st.markdown(f"# {_fmt_money(value, decimals)}")
+
+            st.divider()
+
+            for label, pct in [
+                ("1 kk", values.get("pct_1m")),
+                ("1 vuosi", values.get("pct_1y")),
+                ("5 vuotta", values.get("pct_5y")),
+            ]:
+                icon = "↗" if pct is not None and pct >= 0 else "↘"
+                color = "#15803d" if pct is not None and pct >= 0 else "#b91c1c"
+
+                st.markdown(
+                    f"""
+                    <div style="
+                        display:flex;
+                        justify-content:space-between;
+                        align-items:center;
+                        padding:0.55rem 0;
+                        border-bottom:1px solid #e5e7eb;
+                    ">
+                        <span style="color:#6b7280;">{icon} {label}</span>
+                        <span style="color:{color}; font-weight:700; font-size:1.05rem;">
+                            {_pct_text(pct)}
+                        </span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
 
     with c1:
-        _price_card("Kulta nyt", gold_vals["now"], None, 0)
+        _metal_summary_card(
+            title="🥇 Kulta",
+            value=gold_vals["now"],
+            values=gold_vals,
+            decimals=0,
+        )
+
     with c2:
-        _price_card("Kulta 1 v sitten", gold_vals["1y"], gold_vals["pct_1y"], 0)
-    with c3:
-        _price_card("Hopea nyt", silver_vals["now"], None, 2)
-    with c4:
-        _price_card("Hopea 1 v sitten", silver_vals["1y"], silver_vals["pct_1y"], 2)
+        _metal_summary_card(
+            title="🥈 Hopea",
+            value=silver_vals["now"],
+            values=silver_vals,
+            decimals=2,
+        )
 
     st.divider()
 
-    _render_signal_cards(gold_vals, silver_vals, ratio_vals, ratio_vs_mean)
-
-    st.divider()
-
-    tab_analysis, tab_gold, tab_silver, tab_ratio = st.tabs(
-        ["🧠 Analyysi", "🥇 Kulta", "🥈 Hopea", "⚖️ Kulta / hopea"]
+    tab_gold, tab_silver, tab_ratio, tab_analysis = st.tabs(
+        ["🥇 Kulta", "🥈 Hopea", "⚖️ Kulta / hopea", "🧠 Analyysi"]
     )
 
-    with tab_analysis:
-        _render_analysis(gold_vals, silver_vals, ratio_vals, ratio_vs_mean)
-
+    
     with tab_gold:
         st.markdown("### 🥇 Kullan hinta")
-
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            _price_card("Nyt", gold_vals["now"], None, 0)
-        with c2:
-            _price_card("1 kk sitten", gold_vals["1m"], gold_vals["pct_1m"], 0)
-        with c3:
-            _price_card("1 v sitten", gold_vals["1y"], gold_vals["pct_1y"], 0)
-        with c4:
-            _price_card("5 v sitten", gold_vals["5y"], gold_vals["pct_5y"], 0)
 
         render_price_chart(
             gold_df,
@@ -270,17 +308,7 @@ def render() -> None:
 
     with tab_silver:
         st.markdown("### 🥈 Hopean hinta")
-
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            _price_card("Nyt", silver_vals["now"], None, 2)
-        with c2:
-            _price_card("1 kk sitten", silver_vals["1m"], silver_vals["pct_1m"], 2)
-        with c3:
-            _price_card("1 v sitten", silver_vals["1y"], silver_vals["pct_1y"], 2)
-        with c4:
-            _price_card("5 v sitten", silver_vals["5y"], silver_vals["pct_5y"], 2)
-
+ 
         render_price_chart(
             silver_df,
             "Hopea (€)",
@@ -340,8 +368,14 @@ def render() -> None:
             yaxis_title="Suhdeluku",
             legend_title_text="Sarja",
         )
-
         st.plotly_chart(fig, use_container_width=True)
+
+    with tab_analysis:
+        _render_signal_cards(gold_vals, silver_vals, ratio_vals, ratio_vs_mean)
+        st.divider()
+        _render_analysis(gold_vals, silver_vals, ratio_vals, ratio_vs_mean)
+
+        
 
 
 

@@ -313,48 +313,53 @@ def _render_money_macro_analysis(
     policy_rate: float | None,
     real_rate: float | None,
 ) -> None:
-    st.markdown("### 🤖 Tulkinta")
+    score, icon, status = _macro_score(money_1y, inflation, real_rate)
+
+    st.markdown("### 🧭 Nykytilanne")
 
     points = []
 
     if money_1y is not None:
-        if money_1y > 6:
-            points.append("Rahamäärä kasvaa melko nopeasti, mikä voi pidemmällä aikavälillä lisätä inflaatio- ja valuutan heikkenemispaineita.")
-        elif money_1y > 2:
-            points.append("Rahamäärä kasvaa maltillisesti, mikä viittaa normaalimpaan luotto- ja rahankiertoon.")
+        if money_1y < 6:
+            points.append("Rahamäärän kasvu on maltillista.")
+        elif money_1y < 10:
+            points.append("Rahamäärän kasvu on koholla.")
         else:
-            points.append("Rahamäärän kasvu on hidasta, mikä voi kertoa tiukemmasta rahoitusympäristöstä.")
+            points.append("Rahamäärä kasvaa nopeasti.")
 
-    if inflation is not None and policy_rate is not None:
-        if policy_rate > inflation:
-            points.append("Ohjauskorko on inflaatiota korkeampi, joten rahapolitiikka näyttää reaalisesti melko kireältä.")
+    if inflation is not None:
+        if 0 <= inflation < 3:
+            points.append("Inflaatio on hallinnassa.")
+        elif inflation < 5:
+            points.append("Inflaatio on koholla.")
         else:
-            points.append("Ohjauskorko on inflaatiota matalampi, joten reaalinen korkotaso on edelleen löysähkö.")
+            points.append("Inflaatio on korkea.")
 
     if real_rate is not None:
-        if real_rate > 1:
-            points.append("Reaalikorko on selvästi positiivinen, mikä tukee säästämistä ja voi hillitä kysyntää.")
-        elif real_rate < 0:
-            points.append("Reaalikorko on negatiivinen, jolloin inflaatio syö korkotuottoa ja ostovoimaa.")
+        if real_rate > 0:
+            points.append("Reaalikorko on positiivinen, mikä viittaa kiristävään rahapolitiikkaan.")
+        elif real_rate > -1:
+            points.append("Reaalikorko on lähellä nollaa.")
         else:
-            points.append("Reaalikorko on lähellä nollaa, eli rahapolitiikan kiristävä vaikutus on melko neutraali.")
+            points.append("Reaalikorko on negatiivinen, mikä viittaa yhä kevyempään rahapolitiikkaan.")
 
     if money_5y is not None:
         if money_5y > 25:
-            points.append("Viiden vuoden rahamäärän kasvu on voimakasta, joten pitkän aikavälin rahamäärätausta on selvästi elvyttävä.")
+            points.append("Viiden vuoden rahamäärän kasvu on voimakasta.")
         elif money_5y > 10:
-            points.append("Viiden vuoden rahamäärän kasvu on kohtalaista, mutta ei poikkeuksellisen rajua.")
+            points.append("Viiden vuoden rahamäärän kasvu on kohtalaista.")
         else:
             points.append("Viiden vuoden rahamäärän kasvu on maltillista.")
 
-    if not points:
-        st.info("Tulkintaa ei voitu muodostaa, koska dataa puuttuu.")
-        return
-
     with st.container(border=True):
-        st.markdown(f"**{currency}: rahamäärän, inflaation ja korkojen tilanne**")
-        for p in points:
-            st.write(f"• {p}")
+        st.markdown(f"### {icon} {currency}: {status}")
+        st.metric("Makropisteet", f"{score} / 3")
+
+        if points:
+            for p in points:
+                st.write(f"• {p}")
+        else:
+            st.info("Tulkintaa ei voitu muodostaa, koska dataa puuttuu.")
 
 
 def render_currency_health_card(
@@ -628,6 +633,178 @@ def render_fx_tab(
         st.metric("Max", fmt_num(fx_metrics.max_rate, 4))
 
 
+def _traffic_light(value: float | None, kind: str) -> tuple[str, str]:
+    if value is None or pd.isna(value):
+        return "⚪", "Ei dataa"
+
+    if kind == "money_growth":
+        if value < 6:
+            return "🟢", "Maltillinen"
+        if value < 10:
+            return "🟡", "Koholla"
+        return "🔴", "Nopea"
+
+    if kind == "inflation":
+        if 0 <= value < 3:
+            return "🟢", "Hallinnassa"
+        if value < 5:
+            return "🟡", "Koholla"
+        return "🔴", "Korkea"
+
+    if kind == "policy_rate":
+        if value >= 4:
+            return "🟢", "Kireä"
+        if value >= 1:
+            return "🟡", "Neutraali"
+        return "🔴", "Kevyt"
+
+    if kind == "real_rate":
+        if value > 0:
+            return "🟢", "Positiivinen"
+        if value > -1:
+            return "🟡", "Lähellä nollaa"
+        return "🔴", "Negatiivinen"
+
+    return "⚪", "Ei luokitusta"
+
+
+def _macro_score(
+    money_1y: float | None,
+    inflation: float | None,
+    real_rate: float | None,
+) -> tuple[int, str, str]:
+    score = 0
+
+    if money_1y is not None and money_1y < 6:
+        score += 1
+
+    if inflation is not None and 0 <= inflation < 3:
+        score += 1
+
+    if real_rate is not None and real_rate > 0:
+        score += 1
+
+    if score >= 3:
+        return score, "🟢", "Vahva / terve"
+    if score >= 2:
+        return score, "🟡", "Neutraali / seurattava"
+    return score, "🔴", "Paineessa"
+
+
+def _metric_card(
+    title: str,
+    value: float | None,
+    date_value,
+    kind: str,
+) -> None:
+    icon, label = _traffic_light(value, kind)
+
+    st.metric(title, fmt_pct(value))
+    st.caption(f"{icon} {label}")
+
+    if date_value is not None and not pd.isna(date_value):
+        st.caption(f"Päivä: {pd.to_datetime(date_value).strftime('%Y-%m')}")
+    else:
+        st.caption("Päivä: —")
+
+
+def _render_money_macro_summary_card(
+    currency: str,
+    money_metrics,
+    inflation: float | None,
+    inflation_date,
+    policy_rate: float | None,
+    policy_rate_date,
+    real_rate: float | None,
+    real_rate_date,
+) -> None:
+    score, icon, status = _macro_score(
+        money_metrics.change_1y_pct,
+        inflation,
+        real_rate,
+    )
+
+    money_icon, money_label = _traffic_light(money_metrics.change_1y_pct, "money_growth")
+    infl_icon, infl_label = _traffic_light(inflation, "inflation")
+    policy_icon, policy_label = _traffic_light(policy_rate, "policy_rate")
+    real_icon, real_label = _traffic_light(real_rate, "real_rate")
+
+    points = []
+
+    if money_metrics.change_1y_pct is not None:
+        if money_metrics.change_1y_pct < 6:
+            points.append("✅ Rahamäärän kasvu on maltillista.")
+        elif money_metrics.change_1y_pct < 10:
+            points.append("⚠️ Rahamäärän kasvu on koholla.")
+        else:
+            points.append("🔴 Rahamäärä kasvaa nopeasti.")
+
+    if inflation is not None:
+        if 0 <= inflation < 3:
+            points.append("✅ Inflaatio on hallinnassa.")
+        elif inflation < 5:
+            points.append("⚠️ Inflaatio on koholla.")
+        else:
+            points.append("🔴 Inflaatio on korkea.")
+
+    if real_rate is not None:
+        if real_rate > 0:
+            points.append("✅ Reaalikorko on positiivinen.")
+        elif real_rate > -1:
+            points.append("⚠️ Reaalikorko on lähellä nollaa.")
+        else:
+            points.append("🔴 Reaalikorko on negatiivinen.")
+
+    with st.container(border=True):
+        top1, top2 = st.columns([1.4, 0.8])
+
+        with top1:
+            st.markdown(f"### {icon} {currency}: {status}")
+            st.caption("Yhteenveto rahamäärästä, inflaatiosta ja korkotasosta.")
+
+        with top2:
+            st.metric("Makropisteet", f"{score} / 3")
+
+        k1, k2, k3, k4, k5 = st.columns(5)
+
+        with k1:
+            st.caption("Broad money")
+            st.markdown(f"### {fmt_money_supply(money_metrics.latest_value, currency)}")
+            if money_metrics.latest_date is not None:
+                st.caption(f"Päivä: {money_metrics.latest_date.date()}")
+
+        with k2:
+            st.caption("Rahamäärä 1 v")
+            st.markdown(f"### {money_icon} {fmt_pct(money_metrics.change_1y_pct)}")
+            st.caption(money_label)
+
+        with k3:
+            st.caption("Inflaatio")
+            st.markdown(f"### {infl_icon} {fmt_pct(inflation)}")
+            st.caption(infl_label)
+            if inflation_date is not None and not pd.isna(inflation_date):
+                st.caption(pd.to_datetime(inflation_date).strftime("%Y-%m"))
+
+        with k4:
+            st.caption("Ohjauskorko")
+            st.markdown(f"### {policy_icon} {fmt_pct(policy_rate)}")
+            st.caption(policy_label)
+            if policy_rate_date is not None and not pd.isna(policy_rate_date):
+                st.caption(pd.to_datetime(policy_rate_date).strftime("%Y-%m"))
+
+        with k5:
+            st.caption("Reaalikorko")
+            st.markdown(f"### {real_icon} {fmt_pct(real_rate)}")
+            st.caption(real_label)
+            if real_rate_date is not None and not pd.isna(real_rate_date):
+                st.caption(pd.to_datetime(real_rate_date).strftime("%Y-%m"))
+
+        if points:
+            st.markdown("**Tulkinta**")
+            for p in points:
+                st.write(f"• {p}")
+
+
 def render_money_macro_tab(
     money_currency: str,
     years: int,
@@ -640,80 +817,33 @@ def render_money_macro_tab(
 
     st.markdown(f"#### {money_currency} – rahamäärä, inflaatio ja korot")
     st.caption(
-        "Tässä välilehdessä näytetään vain USD ja EUR, jotta mukana voidaan käyttää tuoreempia kuukausisarjoja. "
-        "Valuuttakurssit näkyvät edelleen kaikille valuutoille erikseen."
+        "Näkymä kokoaa rahamäärän, inflaation, ohjauskoron ja reaalikoron samaan yhteenvetokorttiin. "
+        "Kuvaajat ovat kortin alapuolella historiallisen kehityksen tarkastelua varten."
     )
 
-    with st.expander("Mitä broad money tarkoittaa?"):
+    with st.expander("Mitä mittarit tarkoittavat?", expanded=False):
         st.write(
-            "Broad money tarkoittaa laajaa rahamäärää taloudessa. "
-            "Se sisältää käteisen, käyttötilit sekä muita melko helposti rahaksi muutettavia talletuksia ja likvidejä varoja. "
-            "Karkeasti se kertoo, kuinka paljon rahaa ja ostovoimaa on kierrossa pankkijärjestelmässä."
+            "**Broad money** tarkoittaa laajaa rahamäärää taloudessa. "
+            "Se sisältää käteisen, käyttötilit sekä muita helposti rahaksi muutettavia talletuksia ja likvidejä varoja."
+        )
+        st.write(
+            "**Ohjauskorko** on keskuspankin keskeinen korkotaso, jolla se ohjaa rahan hintaa ja talouden aktiivisuutta."
+        )
+        st.write(
+            "**Reaalikorko-proxy** on tässä yksinkertaistus: ohjauskorko miinus inflaatio. "
+            "Positiivinen arvo viittaa kireämpään rahapolitiikkaan, negatiivinen kevyempään."
         )
 
     if not is_major_macro_currency(money_currency):
-        st.info("Tälle valuutalle näytetään vain kurssidata. Rahamäärä- ja makrodata on rajattu USD:iin ja EUR:oon.")
+        st.info("Tälle valuutalle ei ole vielä riittävän laadukasta rahamäärä- ja makrodataa.")
         return
 
     money_metrics = change_metrics(money, "Date", "BroadMoney_LCU")
 
-    
-
     if money is None or money.empty:
         st.info("Rahamäärädataa ei saatu tälle valuutalle.")
         _show_debug("Rahamäärädatan debug", debug.get("money"))
-    else:
-        latest_candidates = money.dropna(how="all", subset=["BroadMoney_LCU", "BroadMoney_GrowthPct"])
-        if latest_candidates.empty:
-            st.info("Rahamäärädataa ei saatu tälle valuutalle.")
-            _show_debug("Rahamäärädatan debug", debug.get("money"))
-        else:
-            c1, c2, c3 = st.columns(3, gap="large")
-
-            with c1:
-                st.metric(
-                    "Broad money",
-                    fmt_money_supply(money_metrics.latest_value, money_currency),
-                )
-                st.caption(
-                    f"Päivä: {money_metrics.latest_date.date() if money_metrics.latest_date is not None else '—'}"
-                )
-
-            with c2:
-                st.metric("Broad money muutos 1 v", fmt_pct(money_metrics.change_1y_pct))
-                st.caption("Taso")
-
-            with c3:
-                st.metric("Broad money muutos 5 v", fmt_pct(money_metrics.change_5y_pct))
-                st.caption("Taso")
-
-            plot_df = money.melt(
-                id_vars=["Date"],
-                value_vars=["BroadMoney_GrowthPct"],
-                var_name="Sarja",
-                value_name="Arvo",
-            ).dropna()
-
-            if not plot_df.empty:
-                plot_df = plot_df[plot_df["Date"] >= DISPLAY_START_DATE].copy()
-
-                fig = px.line(
-                    plot_df,
-                    x="Date",
-                    y="Arvo",
-                    color="Sarja",
-                    title=f"{money_currency} – broad money -kasvu",
-                    labels={"Date": "Päivä", "Arvo": "%", "Sarja": ""},
-                )
-                st.plotly_chart(fig, use_container_width=True)
-
-    st.divider()
-    st.markdown("#### Inflaatio ja korko")
-    st.caption(
-        "**Ohjauskorko** on keskuspankin keskeinen korkotaso, jolla se ohjaa rahan hintaa ja talouden aktiivisuutta. "
-        "**Reaalikorko-proxy** on tässä yksinkertaistus: ohjauskorko miinus inflaatio. "
-        "Positiivinen arvo tarkoittaa karkeasti, että korkotaso on inflaatiota korkeampi, negatiivinen että inflaatio syö korkotuoton."
-    )
+        return
 
     if macro is None or macro.empty:
         st.info("Inflaatio- tai korkodataa ei saatu tälle valuutalle.")
@@ -724,33 +854,39 @@ def render_money_macro_tab(
     pol_val, pol_date = _latest_non_null(macro, "PolicyRate_Pct")
     real_val, real_date = _latest_non_null(macro, "RealInterestRate_Pct")
 
-    if inf_val is None and pol_val is None and real_val is None:
-        st.info("Inflaatio- tai korkodataa ei saatu tälle valuutalle.")
-        _show_debug("Makrodatan debug", debug.get("macro"))
-        return
-
-    c1, c2, c3 = st.columns(3)
-
-    with c1:
-        st.metric("Inflaatio", fmt_pct(inf_val))
-        st.caption(f"Päivä: {inf_date.date()}" if inf_date is not None else "Päivä: —")
-
-    with c2:
-        st.metric("Ohjauskorko", fmt_pct(pol_val))
-        st.caption(f"Päivä: {pol_date.date()}" if pol_date is not None else "Päivä: —")
-
-    with c3:
-        st.metric("Reaalikorko-proxy", fmt_pct(real_val))
-        st.caption(f"Päivä: {real_date.date()}" if real_date is not None else "Päivä: —")
-
-    _render_money_macro_analysis(
+    _render_money_macro_summary_card(
         currency=money_currency,
-        money_1y=money_metrics.change_1y_pct,
-        money_5y=money_metrics.change_5y_pct,
+        money_metrics=money_metrics,
         inflation=inf_val,
+        inflation_date=inf_date,
         policy_rate=pol_val,
+        policy_rate_date=pol_date,
         real_rate=real_val,
+        real_rate_date=real_date,
     )
+
+    st.divider()
+    st.markdown("### 📈 Kuvaajat")
+
+    plot_df = money.melt(
+        id_vars=["Date"],
+        value_vars=["BroadMoney_GrowthPct"],
+        var_name="Sarja",
+        value_name="Arvo",
+    ).dropna()
+
+    if not plot_df.empty:
+        plot_df = plot_df[plot_df["Date"] >= DISPLAY_START_DATE].copy()
+
+        fig = px.line(
+            plot_df,
+            x="Date",
+            y="Arvo",
+            color="Sarja",
+            title=f"{money_currency} – broad money -kasvu",
+            labels={"Date": "Päivä", "Arvo": "%", "Sarja": ""},
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
     macro_plot = macro.melt(
         id_vars=["Date"],
@@ -772,6 +908,7 @@ def render_money_macro_tab(
         )
         st.plotly_chart(fig, use_container_width=True)
 
+    _show_debug("Rahamäärädatan huomautus", debug.get("money"))
     _show_debug("Makrodatan huomautus", debug.get("macro"))
 
 
@@ -838,4 +975,4 @@ def macro_currency_format_func(code: str) -> str:
 
 
 def get_macro_currency_options() -> list[str]:
-    return get_major_macro_currencies()
+    return [c for c in ["USD", "EUR", "JPY", "CNY"] if c in CURRENCY_META]

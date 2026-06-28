@@ -32,6 +32,7 @@ from services.currency_data import (
 )
 
 
+
 @st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
 def load_fx_series(currency: str, years: int = 10) -> pd.DataFrame:
     return fetch_ecb_fx_series(currency, years=years)
@@ -95,52 +96,226 @@ def load_central_bank_balance_sheets(years: int = 10) -> dict:
     return {"data": df, "debug": debug}
 
 
+def _fx_traffic_light(value: float | None, kind: str) -> tuple[str, str]:
+    if value is None or pd.isna(value):
+        return "⚪", "Ei dataa"
+
+    v = abs(float(value))
+
+    if kind == "change":
+        if v < 5:
+            return "🟢", "Maltillinen"
+        if v < 15:
+            return "🟡", "Selvä liike"
+        return "🔴", "Voimakas liike"
+
+    if kind == "volatility":
+        if v < 8:
+            return "🟢", "Rauhallinen"
+        if v < 15:
+            return "🟡", "Koholla"
+        return "🔴", "Voimakas"
+
+    return "⚪", "Ei luokitusta"
+
+
+def _fx_score(metrics) -> tuple[int, str, str]:
+    score = 0
+
+    if metrics.ytd_pct is not None and abs(metrics.ytd_pct) < 5:
+        score += 1
+
+    if metrics.change_1y_pct is not None and abs(metrics.change_1y_pct) < 5:
+        score += 1
+
+    if metrics.change_5y_pct is not None and abs(metrics.change_5y_pct) < 15:
+        score += 1
+
+    if metrics.volatility_1y_pct is not None and metrics.volatility_1y_pct < 8:
+        score += 1
+
+    if score >= 3:
+        return score, "🟢", "Vakaa"
+    if score >= 2:
+        return score, "🟡", "Neutraali / seurattava"
+    return score, "🔴", "Heilahteleva"
+
+
+def _render_fx_summary_card(pair_label: str, metrics) -> None:
+    score, icon, status = _fx_score(metrics)
+
+    ytd_icon, ytd_label = _fx_traffic_light(metrics.ytd_pct, "change")
+    ch1_icon, ch1_label = _fx_traffic_light(metrics.change_1y_pct, "change")
+    ch5_icon, ch5_label = _fx_traffic_light(metrics.change_5y_pct, "change")
+    vol_icon, vol_label = _fx_traffic_light(metrics.volatility_1y_pct, "volatility")
+
+    points = []
+
+    if metrics.ytd_pct is not None:
+        if metrics.ytd_pct > 0:
+            points.append("Valuutta on vahvistunut vuoden alusta.")
+        elif metrics.ytd_pct < 0:
+            points.append("Valuutta on heikentynyt vuoden alusta.")
+
+    if metrics.change_1y_pct is not None:
+        if abs(metrics.change_1y_pct) < 5:
+            points.append("Vuoden muutos on ollut maltillinen.")
+        else:
+            points.append("Vuoden aikana kurssissa on ollut selvä liike.")
+
+    if metrics.volatility_1y_pct is not None:
+        if metrics.volatility_1y_pct < 8:
+            points.append("Volatiliteetti on ollut rauhallista.")
+        else:
+            points.append("Volatiliteetti on koholla.")
+
+    with st.container(border=True):
+        top1, top2 = st.columns([1.4, 0.8])
+
+        with top1:
+            st.markdown(f"### {icon} {pair_label}: {status}")
+            st.caption("Yhteenveto valuuttakurssin muutoksesta ja heilunnasta.")
+
+        with top2:
+            st.metric("Kurssipisteet", f"{score} / 4")
+
+        k1, k2, k3, k4, k5 = st.columns(5)
+
+        with k1:
+            st.caption("Nykykurssi")
+            st.markdown(f"### {fmt_num(metrics.latest_rate, 4)}")
+            if metrics.latest_date is not None:
+                st.caption(f"Päivä: {metrics.latest_date.date()}")
+
+        with k2:
+            st.caption("YTD")
+            st.markdown(f"### {ytd_icon} {fmt_pct(metrics.ytd_pct)}")
+            st.caption(ytd_label)
+
+        with k3:
+            st.caption("Muutos 1 v")
+            st.markdown(f"### {ch1_icon} {fmt_pct(metrics.change_1y_pct)}")
+            st.caption(ch1_label)
+
+        with k4:
+            st.caption("Muutos 5 v")
+            st.markdown(f"### {ch5_icon} {fmt_pct(metrics.change_5y_pct)}")
+            st.caption(ch5_label)
+
+        with k5:
+            st.caption("Volatiliteetti 1 v")
+            st.markdown(f"### {vol_icon} {fmt_pct(metrics.volatility_1y_pct)}")
+            st.caption(vol_label)
+
+        if points:
+            st.markdown("**Tulkinta**")
+            for p in points:
+                st.write(f"• {p}")
+
+
+def _filter_fx_window(fx: pd.DataFrame, window_label: str) -> pd.DataFrame:
+    if fx is None or fx.empty:
+        return pd.DataFrame()
+
+    d = fx.copy()
+    d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
+    d = d.dropna(subset=["Date"]).sort_values("Date")
+
+    if d.empty:
+        return d
+
+    latest = d["Date"].max()
+
+    years_map = {
+        "1 v": 1,
+        "3 v": 3,
+        "5 v": 5,
+        "10 v": 10,
+    }
+
+    years_back = years_map.get(window_label, 10)
+    cutoff = latest - pd.DateOffset(years=years_back)
+
+    return d[d["Date"] >= cutoff].copy()
+
+
+def _prepare_fx_plot_df(fx: pd.DataFrame, display_mode: str) -> tuple[pd.DataFrame, str, str]:
+    plot_df = fx.copy()
+
+    if display_mode == "Indeksi 100":
+        first = pd.to_numeric(plot_df["Rate"], errors="coerce").dropna()
+        if first.empty:
+            return pd.DataFrame(), "Rate", "Kurssi"
+
+        base = float(first.iloc[0])
+        if base == 0:
+            return pd.DataFrame(), "Rate", "Kurssi"
+
+        plot_df["Index"] = plot_df["Rate"] / base * 100.0
+        return plot_df, "Index", "Indeksi, alku = 100"
+
+    return plot_df, "Rate", "Kurssi"
+
+
 
 def render_fx_tab_fast(fx_currency: str, years: int) -> None:
     fx_raw = load_fx_series(fx_currency, years=years)
     anchor_fx = load_fx_series(ANCHOR_CURRENCY, years=years)
 
     fx = to_anchor_fx(fx_raw, anchor_fx)
-    metrics = build_fx_metrics(fx)
-
-    st.markdown(f"#### {fx_currency} – kurssikehitys")
 
     if fx is None or fx.empty:
         st.warning("Kurssihistoriaa ei saatu.")
         return
 
-    k1, k2, k3, k4 = st.columns(4, gap="large")
+    metrics = build_fx_metrics(fx)
+    pair_label = f"{fx_currency} / {ANCHOR_CURRENCY}"
 
-    with k1:
-        st.metric(
-            f"{fx_currency} / {ANCHOR_CURRENCY}",
-            fmt_num(metrics.latest_rate, 4),
-            f"{fmt_pct(metrics.ytd_pct)} (YTD)" if metrics.ytd_pct is not None else None,
-        )
-        if metrics.latest_date is not None:
-            st.caption(f"Päivä: {metrics.latest_date.date()}")
+    st.markdown(f"#### {pair_label} – kurssikehitys")
 
-    with k2:
-        st.metric("Muutos 1 v", fmt_pct(metrics.change_1y_pct))
-        st.caption("Valuuttakurssi")
-
-    with k3:
-        st.metric("Muutos 5 v", fmt_pct(metrics.change_5y_pct))
-        st.caption("Valuuttakurssi")
-
-    with k4:
-        st.metric("Volatiliteetti 1 v", fmt_pct(metrics.volatility_1y_pct))
-        st.caption("Annualisoitu")
+    _render_fx_summary_card(pair_label, metrics)
 
     st.divider()
+    st.markdown("### 📈 Kuvaaja")
+
+    c1, c2 = st.columns([1, 1])
+
+    with c1:
+        window_label = st.radio(
+            "Aikajakso",
+            ["1 v", "3 v", "5 v", "10 v"],
+            index=3,
+            horizontal=True,
+            key=f"fx_window_{fx_currency}",
+        )
+
+    with c2:
+        display_mode = st.radio(
+            "Näyttötapa",
+            ["Kurssi", "Indeksi 100"],
+            index=0,
+            horizontal=True,
+            key=f"fx_display_mode_{fx_currency}",
+        )
+
+    plot_source = _filter_fx_window(fx, window_label)
+    plot_df, y_col, y_label = _prepare_fx_plot_df(plot_source, display_mode)
+
+    if plot_df is None or plot_df.empty:
+        st.info("Kuvaajadataa ei saatu valitulle aikajaksolle.")
+        return
 
     fig = px.line(
-        fx,
+        plot_df,
         x="Date",
-        y="Rate",
-        title=f"{fx_currency} / {ANCHOR_CURRENCY} – viimeiset {years} vuotta",
-        labels={"Date": "Päivä", "Rate": f"{fx_currency} per {ANCHOR_CURRENCY}"},
+        y=y_col,
+        title=f"{pair_label} – {window_label}, {display_mode.lower()}",
+        labels={
+            "Date": "Päivä",
+            y_col: y_label,
+        },
     )
+
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -208,6 +383,7 @@ def render() -> None:
             load_currency_bundle=load_money_macro_bundle,
         )
     elif view == "🏛️ Keskuspankkien taseet":
+        
         st.markdown("### 🏛️ Keskuspankkien taseet")
 
         with st.expander("Mitä keskuspankin tase tarkoittaa ja miten sitä tulkitaan?", expanded=False):
@@ -231,6 +407,10 @@ def render() -> None:
         bundle = load_central_bank_balance_sheets(years=years)
         df = bundle["data"]
 
+        if bundle.get("debug"):
+            with st.expander("Tekninen lähdehuomautus", expanded=False):
+                st.caption(bundle["debug"])
+
         if df is None or df.empty:
             st.warning("Keskuspankkien tasedataa ei saatu.")
             return
@@ -242,9 +422,9 @@ def render() -> None:
             .sort_values("CentralBank")
         )
 
-        c1, c2, c3 = st.columns(3)
+        cols = st.columns(min(4, len(latest)))
 
-        for col, (_, row) in zip([c1, c2, c3], latest.iterrows()):
+        for col, (_, row) in zip(cols, latest.iterrows()):
             with col:
                 st.metric(
                     row["Name"],
