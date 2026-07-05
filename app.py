@@ -120,7 +120,7 @@ PAGE_OPTIONS = [
     "💱 Valuuttakurssit",
     "📊 Makrotalous",
     "🪙 Kulta ja hopea",
-    "₿ Bitcoin",
+    "₿ Kryptovaluutat",
     "🛢 Öljy ja polttoaineet",
     "🏠 Kiinteistöt ja rakentaminen",
     "🌲 Metsätalous",
@@ -165,7 +165,7 @@ elif page == "📊 Makrotalous":
 elif page == "🪙 Kulta ja hopea":
     safe_render("Kulta ja hopea", gold.render, show_details=SHOW_DEBUG_DETAILS)
 
-elif page == "₿ Bitcoin":
+elif page == "₿ Kryptovaluutat":
     safe_render("Bitcoin", bitcoin.render, show_details=SHOW_DEBUG_DETAILS)
 
 elif page == "🛢 Öljy ja polttoaineet":
