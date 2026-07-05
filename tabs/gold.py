@@ -227,8 +227,6 @@ def render() -> None:
 
     st.markdown("### 💶 Hinnat euroissa")
 
-    c1, c2 = st.columns(2)
-
 
     def _metal_summary_card(
         title: str,
@@ -239,7 +237,7 @@ def render() -> None:
         with st.container(border=True):
             st.markdown(f"### {title}")
             st.caption("Nykyinen hinta")
-            st.markdown(f"# {_fmt_money(value, decimals)}")
+            st.markdown(f"## {_fmt_money(value, decimals)}")
 
             st.divider()
 
@@ -257,18 +255,18 @@ def render() -> None:
                         display:flex;
                         justify-content:space-between;
                         align-items:center;
-                        padding:0.55rem 0;
+                        padding:0.45rem 0;
                         border-bottom:1px solid #e5e7eb;
                     ">
                         <span style="color:#6b7280;">{icon} {label}</span>
-                        <span style="color:{color}; font-weight:700; font-size:1.05rem;">
-                            {_pct_text(pct)}
-                        </span>
+                        <span style="color:{color}; font-weight:700;">{_pct_text(pct)}</span>
                     </div>
                     """,
                     unsafe_allow_html=True,
                 )
 
+
+    c1, c2, _ = st.columns([0.34, 0.34, 0.32])
 
     with c1:
         _metal_summary_card(

@@ -1,7 +1,6 @@
 # tabs/bitcoin.py
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -13,6 +12,16 @@ from services.asset_ui import (
     filter_by_period,
     period_selector,
     render_price_chart_with_extra_lines,
+)
+from services.crypto import (
+    clean_price_df,
+    latest_valid,
+    add_ma200,
+    calc_volatility_30d,
+    calc_volume_stats,
+    normalize_price,
+    eth_btc_ratio,
+    drawdown_df,
 )
 
 
@@ -39,13 +48,6 @@ def _fmt_money(x: float | None, currency: str = "€", decimals: int = 0) -> str
         return f"{x / 1_000_000:,.2f}".replace(",", " ") + f" milj. {currency}"
 
     return f"{x:,.{decimals}f}".replace(",", " ") + f" {currency}"
-
-
-def _latest_valid(series: pd.Series) -> float | None:
-    s = pd.to_numeric(series, errors="coerce").dropna()
-    if s.empty:
-        return None
-    return float(s.iloc[-1])
 
 
 def _pct_color(value: float | None) -> str:
@@ -142,6 +144,97 @@ def load_btc_eur() -> pd.DataFrame:
 def load_btc_usd() -> pd.DataFrame:
     return fetch_price_history("BTC-USD", period="10y")
 
+@st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
+def load_eth_eur() -> pd.DataFrame:
+    return fetch_price_history_eur("ETH-USD", period="10y")
+
+
+@st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
+def load_eth_usd() -> pd.DataFrame:
+    return fetch_price_history("ETH-USD", period="10y")
+
+
+def _render_crypto_price_card(
+    title: str,
+    vals: dict,
+    decimals: int = 0,
+) -> None:
+    with st.container(border=True):
+        st.markdown(f"### {title}")
+        st.caption("Nykyinen hinta")
+        st.markdown(f"## {_fmt_money(vals.get('now'), '€', decimals)}")
+
+        st.divider()
+
+        for label, pct in [
+            ("1 kk", vals.get("pct_1m")),
+            ("1 vuosi", vals.get("pct_1y")),
+            ("5 vuotta", vals.get("pct_5y")),
+        ]:
+            icon = "↗" if pct is not None and pct >= 0 else "↘"
+            color = "#15803d" if pct is not None and pct >= 0 else "#b91c1c"
+
+            st.markdown(
+                f"""
+                <div style="
+                    display:flex;
+                    justify-content:space-between;
+                    align-items:center;
+                    padding:0.45rem 0;
+                    border-bottom:1px solid #e5e7eb;
+                ">
+                    <span style="color:#6b7280;">{icon} {label}</span>
+                    <span style="color:{color}; font-weight:700;">{_pct_text(pct)}</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+def _crypto_stats(
+    eur_df: pd.DataFrame,
+    usd_df: pd.DataFrame,
+    vals: dict,
+) -> dict:
+    ath_usd = float(pd.to_numeric(usd_df["Close"], errors="coerce").max())
+    atl_usd = float(pd.to_numeric(usd_df["Close"], errors="coerce").min())
+    ath_eur = float(pd.to_numeric(eur_df["Close"], errors="coerce").max())
+    atl_eur = float(pd.to_numeric(eur_df["Close"], errors="coerce").min())
+
+    plot_df = add_ma200(eur_df)
+
+    return {
+        "ath_usd": ath_usd,
+        "atl_usd": atl_usd,
+        "ath_eur": ath_eur,
+        "atl_eur": atl_eur,
+        "drawdown": pct_change(vals["now"], ath_eur),
+        "vol30": calc_volatility_30d(eur_df),
+        "vol_now": calc_volume_stats(usd_df)[0],
+        "vol_30avg": calc_volume_stats(usd_df)[1],
+        "plot_df": plot_df,
+        "ma200_latest": latest_valid(plot_df["MA200_EUR"]),
+        "usd_df": usd_df,
+        "vals": vals,
+    }
+
+
+def _select_crypto_asset(
+    btc_stats: dict,
+    eth_stats: dict,
+) -> tuple[str, dict]:
+    selected = st.segmented_control(
+        "Valitse kryptovaluutta",
+        options=["Bitcoin", "Ethereum"],
+        default="Bitcoin",
+        key="crypto_asset_selector",
+    )
+
+    if selected == "Ethereum":
+        return "Ethereum", eth_stats
+
+    return "Bitcoin", btc_stats
+
 
 def _render_signal_cards(
     btc_vals: dict,
@@ -192,24 +285,25 @@ def _render_signal_cards(
 
 
 def _render_analysis(
-    btc_vals: dict,
+    asset_name: str,
+    asset_vals: dict,
     drawdown_from_ath: float | None,
     vol30: float | None,
     ma200_latest: float | None,
     vol_now: float | None,
     vol_30avg: float | None,
 ) -> None:
-    now = btc_vals.get("now")
-    pct_1m = btc_vals.get("pct_1m")
-    pct_1y = btc_vals.get("pct_1y")
+    now = asset_vals.get("now")
+    pct_1m = asset_vals.get("pct_1m")
+    pct_1y = asset_vals.get("pct_1y")
 
     parts = []
 
     if now is not None and ma200_latest is not None:
         if now > ma200_latest:
-            parts.append("Bitcoin on 200 päivän keskiarvon yläpuolella, mikä viittaa teknisesti vahvempaan trendiin.")
+            parts.append(f"{asset_name} on 200 päivän keskiarvon yläpuolella, mikä viittaa teknisesti vahvempaan trendiin.")
         else:
-            parts.append("Bitcoin on 200 päivän keskiarvon alapuolella, mikä kertoo varovaisemmasta trendikuvasta.")
+            parts.append(f"{asset_name} on 200 päivän keskiarvon alapuolella, mikä kertoo varovaisemmasta trendikuvasta.")
 
     if pct_1m is not None:
         if pct_1m > 10:
@@ -235,9 +329,9 @@ def _render_analysis(
 
     if vol30 is not None:
         if vol30 > 80:
-            parts.append("Volatiliteetti on korkea, joten lyhyen aikavälin heilunta voi olla voimakasta.")
+            parts.append(f"{asset_name}n volatiliteetti on korkea, joten lyhyen aikavälin heilunta voi olla voimakasta.")
         elif vol30 < 45:
-            parts.append("Volatiliteetti on bitcoinille verrattain rauhallinen.")
+            parts.append(f"{asset_name}n volatiliteetti on kryptomarkkinoille verrattain rauhallinen.")
 
     if vol_now is not None and vol_30avg is not None and vol_30avg != 0:
         vol_diff = (vol_now / vol_30avg - 1.0) * 100.0
@@ -252,115 +346,80 @@ def _render_analysis(
     if not parts:
         parts.append("Analyysia ei voitu muodostaa, koska keskeisiä tunnuslukuja puuttuu.")
 
-    st.markdown("### 🧠 Bitcoin-analyysi")
+    st.markdown(f"### 🧠 {asset_name}-analyysi")
+
     with st.container(border=True):
         st.write(" ".join(parts))
 
     st.info(
-        "Tämä ei ole sijoitussuositus. Bitcoin on korkean riskin omaisuuserä, "
+        f"Tämä ei ole sijoitussuositus. {asset_name} on korkean riskin kryptovaluutta, "
         "jonka hinta voi muuttua nopeasti."
     )
 
 
 def render() -> None:
-    st.subheader("₿ Bitcoin")
-    st.caption("Lähde: Yahoo Finance. Euromääräinen hinta muodostetaan BTC/USD- ja EUR/USD-sarjoista.")
+    st.subheader("₿ Kryptovaluutat")
+    st.caption("Lähde: Yahoo Finance. Euromääräinen hinta muodostetaan USD-hinnoista ja EUR/USD-sarjasta.")
 
     btc_eur_df = load_btc_eur()
     btc_usd_df = load_btc_usd()
+    eth_eur_df = load_eth_eur()
+    eth_usd_df = load_eth_usd()
 
-    if btc_eur_df is None or btc_eur_df.empty or btc_usd_df is None or btc_usd_df.empty:
-        st.error("Bitcoin-dataa ei saatu.")
+    if (
+        btc_eur_df is None or btc_eur_df.empty
+        or btc_usd_df is None or btc_usd_df.empty
+        or eth_eur_df is None or eth_eur_df.empty
+        or eth_usd_df is None or eth_usd_df.empty
+    ):
+        st.error("Kryptodataa ei saatu.")
         return
 
-    btc_eur_df = btc_eur_df.copy()
-    btc_usd_df = btc_usd_df.copy()
-
-    btc_eur_df["Date"] = pd.to_datetime(btc_eur_df["Date"], errors="coerce")
-    btc_usd_df["Date"] = pd.to_datetime(btc_usd_df["Date"], errors="coerce")
-
-    btc_eur_df["Close"] = pd.to_numeric(btc_eur_df["Close"], errors="coerce")
-    btc_usd_df["Close"] = pd.to_numeric(btc_usd_df["Close"], errors="coerce")
-
-    btc_eur_df = btc_eur_df.dropna(subset=["Date", "Close"]).sort_values("Date").reset_index(drop=True)
-    btc_usd_df = btc_usd_df.dropna(subset=["Date", "Close"]).sort_values("Date").reset_index(drop=True)
-
-    latest_date = max(btc_eur_df["Date"].max(), btc_usd_df["Date"].max())
-    st.caption(f"Viimeisin markkinadata: {latest_date.date()}")
+    btc_eur_df = clean_price_df(btc_eur_df)
+    btc_usd_df = clean_price_df(btc_usd_df)
+    eth_eur_df = clean_price_df(eth_eur_df)
+    eth_usd_df = clean_price_df(eth_usd_df)
 
     btc_vals = latest_period_values(btc_eur_df, "Close")
+    eth_vals = latest_period_values(eth_eur_df, "Close")
 
-    ath_usd = float(pd.to_numeric(btc_usd_df["Close"], errors="coerce").max())
-    atl_usd = float(pd.to_numeric(btc_usd_df["Close"], errors="coerce").min())
-    ath_eur = float(pd.to_numeric(btc_eur_df["Close"], errors="coerce").max())
-    atl_eur = float(pd.to_numeric(btc_eur_df["Close"], errors="coerce").min())
+    latest_date = max(
+        btc_eur_df["Date"].max(),
+        btc_usd_df["Date"].max(),
+        eth_eur_df["Date"].max(),
+        eth_usd_df["Date"].max(),
+    )
+    st.caption(f"Viimeisin markkinadata: {latest_date.date()}")
 
-    drawdown_from_ath = pct_change(btc_vals["now"], ath_eur)
-
-    btc_eur_df["ret"] = btc_eur_df["Close"].pct_change()
-    vol30 = btc_eur_df["ret"].tail(30).std() * np.sqrt(365) * 100 if len(btc_eur_df) >= 30 else None
-
-    vol_now = None
-    vol_30avg = None
-    if "Volume" in btc_usd_df.columns:
-        btc_usd_df["Volume"] = pd.to_numeric(btc_usd_df["Volume"], errors="coerce")
-        vol_now = _latest_valid(btc_usd_df["Volume"])
-        vol_30avg = float(btc_usd_df["Volume"].tail(30).mean()) if len(btc_usd_df) >= 30 else None
-
-    plot_df = btc_eur_df.copy()
-    plot_df["Close_EUR"] = plot_df["Close"]
-    plot_df["MA200_EUR"] = plot_df["Close_EUR"].rolling(200).mean()
-    ma200_latest = _latest_valid(plot_df["MA200_EUR"])
+    btc_stats = _crypto_stats(btc_eur_df, btc_usd_df, btc_vals)
+    eth_stats = _crypto_stats(eth_eur_df, eth_usd_df, eth_vals)
 
     st.markdown("### 💶 Hinta euroissa")
 
-    left, _ = st.columns([0.42, 0.58])
+    c1, c2, _ = st.columns([0.34, 0.34, 0.32])
 
-    with left:
-        with st.container(border=True):
-            st.markdown("### ₿ Bitcoin")
-            st.caption("Nykyinen hinta")
-            st.markdown(f"# {_fmt_money(btc_vals['now'], '€', 0)}")
+    with c1:
+        _render_crypto_price_card("₿ Bitcoin", btc_vals, 0)
 
-            st.divider()
-
-            for label, pct in [
-                ("1 kk", btc_vals.get("pct_1m")),
-                ("1 vuosi", btc_vals.get("pct_1y")),
-                ("5 vuotta", btc_vals.get("pct_5y")),
-            ]:
-                icon = "↗" if pct is not None and pct >= 0 else "↘"
-                color = "#15803d" if pct is not None and pct >= 0 else "#b91c1c"
-
-                st.markdown(
-                    f"""
-                    <div style="
-                        display:flex;
-                        justify-content:space-between;
-                        align-items:center;
-                        padding:0.45rem 0;
-                        border-bottom:1px solid #e5e7eb;
-                    ">
-                        <span style="color:#6b7280;">{icon} {label}</span>
-                        <span style="color:{color}; font-weight:700;">{_pct_text(pct)}</span>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+    with c2:
+        _render_crypto_price_card("Ξ Ethereum", eth_vals, 0)
 
     st.divider()
 
-
-    tab_price, tab_drawdown, tab_volume, tab_analysis = st.tabs(
-        ["💹 Hinta", "📉 Drawdown", "📦 Volyymi", "🧠 Analyysi"]
+    asset_name, asset = _select_crypto_asset(
+        btc_stats=btc_stats,
+        eth_stats=eth_stats,
     )
 
-    
+    tab_price, tab_drawdown, tab_volume, tab_compare, tab_analysis = st.tabs(
+        ["💹 Hinta", "📉 Drawdown", "📦 Volyymi", "⚖️ BTC vs ETH", "🧠 Analyysi"]
+    )
+
     with tab_price:
         render_price_chart_with_extra_lines(
-            plot_df,
-            title="Bitcoin (€)",
-            key="btc_price_period",
+            asset["plot_df"],
+            title=f"{asset_name} (€)",
+            key="crypto_price_period",
             base_col="Close_EUR",
             extra_lines=[
                 ("MA200_EUR", "MA200", {}),
@@ -368,46 +427,40 @@ def render() -> None:
             y_title="EUR",
             options=["1 kk", "1 v", "5 v", "10 v"],
             default="1 v",
-            postprocess=_add_halving_lines,
+            postprocess=_add_halving_lines if asset_name == "Bitcoin" else None,
         )
 
-   
-
     with tab_drawdown:
-        st.markdown("### 📉 Drawdown")
+        st.markdown(f"### 📉 Drawdown: {asset_name}")
 
         c1, c2, c3 = st.columns(3)
 
         with c1:
-            _price_card("ATH", ath_eur, None)
-            st.caption(_fmt_money(ath_usd, "$", 0))
+            _price_card("ATH", asset["ath_eur"], None)
+            st.caption(_fmt_money(asset["ath_usd"], "$", 0))
 
         with c2:
-            _price_card("ATL", atl_eur, None)
-            st.caption(_fmt_money(atl_usd, "$", 0))
+            _price_card("ATL", asset["atl_eur"], None)
+            st.caption(_fmt_money(asset["atl_usd"], "$", 0))
 
         with c3:
             with st.container(border=True):
                 st.caption("ATH-drawdown")
                 st.markdown(
-                    f"## {drawdown_from_ath:+.1f} %"
-                    if drawdown_from_ath is not None
+                    f"## {asset['drawdown']:+.1f} %"
+                    if asset["drawdown"] is not None
                     else "## —"
                 )
                 st.caption("Nykyhinta vs kaikkien aikojen huippu")
 
         period = period_selector(
             "Kuvaajan tarkasteluväli",
-            key="btc_dd_period",
+            key="crypto_dd_period",
             options=["1 kk", "1 v", "5 v", "10 v"],
             default="1 v",
         )
 
-        dd = plot_df.dropna(subset=["Close_EUR"]).copy()
-        dd["rolling_ath"] = dd["Close_EUR"].cummax()
-        dd["drawdown_pct"] = (dd["Close_EUR"] / dd["rolling_ath"] - 1.0) * 100.0
-        dd["drawdown_pct"] = dd["drawdown_pct"].clip(upper=0)
-
+        dd = drawdown_df(asset["plot_df"])
         dd_plot = filter_by_period(dd, period, date_col="Date")
 
         y_min = float(dd_plot["drawdown_pct"].min()) if not dd_plot.empty else -10.0
@@ -417,42 +470,45 @@ def render() -> None:
             dd_plot,
             x="Date",
             y="drawdown_pct",
-            title=f"Bitcoinin drawdown ATH:sta ({period})",
+            title=f"{asset_name}: drawdown ATH:sta ({period})",
             labels={"Date": "Päivä", "drawdown_pct": "%"},
         )
+
         fig.update_yaxes(range=[y_min, 5], ticksuffix=" %")
         fig.add_hline(y=0, line_dash="dash")
         st.plotly_chart(fig, use_container_width=True)
 
     with tab_volume:
-        st.markdown("### 📦 Volyymi")
+        st.markdown(f"### 📦 Volyymi: {asset_name}")
 
         v1, v2 = st.columns(2)
 
         with v1:
             with st.container(border=True):
                 st.caption("Volyymi nyt")
-                st.markdown(f"## {_fmt_money(vol_now, '', 0).strip()}")
+                st.markdown(f"## {_fmt_money(asset['vol_now'], '', 0).strip()}")
                 st.caption("Yahoo Finance volume")
 
         with v2:
             with st.container(border=True):
                 st.caption("Volyymi, 30 pv ka")
-                st.markdown(f"## {_fmt_money(vol_30avg, '', 0).strip()}")
+                st.markdown(f"## {_fmt_money(asset['vol_30avg'], '', 0).strip()}")
                 st.caption("Keskiarvo")
 
         period = period_selector(
             "Kuvaajan tarkasteluväli",
-            key="btc_vol_period",
+            key="crypto_vol_period",
             options=["1 kk", "1 v", "5 v", "10 v"],
             default="1 v",
         )
 
-        if "Volume" not in btc_usd_df.columns or btc_usd_df["Volume"].dropna().empty:
+        usd_df = asset["usd_df"]
+
+        if "Volume" not in usd_df.columns or usd_df["Volume"].dropna().empty:
             st.info("Volyymihistoriaa ei löytynyt tästä aineistosta.")
         else:
             vol_plot_df = filter_by_period(
-                btc_usd_df.dropna(subset=["Volume"]).copy(),
+                usd_df.dropna(subset=["Volume"]).copy(),
                 period,
                 date_col="Date",
             )
@@ -463,29 +519,85 @@ def render() -> None:
                 vol_plot_df,
                 x="Date",
                 y="Volume_B",
-                title=f"Bitcoinin volyymi ({period})",
+                title=f"{asset_name}: volyymi ({period})",
                 labels={"Date": "Päivä", "Volume_B": "Volyymi (mrd)"},
             )
 
             fig.update_yaxes(ticksuffix=" mrd")
             st.plotly_chart(fig, use_container_width=True)
 
-    with tab_analysis:
+    with tab_compare:
+        st.markdown("### ⚖️ Bitcoin vs Ethereum")
 
+        period = period_selector(
+            "Kuvaajan tarkasteluväli",
+            key="btc_eth_compare",
+            options=["1 kk", "1 v", "5 v", "10 v"],
+            default="1 v",
+        )
+
+        btc_compare = normalize_price(filter_by_period(btc_eur_df, period))
+        eth_compare = normalize_price(filter_by_period(eth_eur_df, period))
+
+        fig = px.line()
+
+        fig.add_scatter(
+            x=btc_compare["Date"],
+            y=btc_compare["Normalized"],
+            name="Bitcoin",
+            mode="lines",
+        )
+
+        fig.add_scatter(
+            x=eth_compare["Date"],
+            y=eth_compare["Normalized"],
+            name="Ethereum",
+            mode="lines",
+        )
+
+        fig.update_layout(
+            title=f"Normalisoitu hintakehitys ({period})",
+            xaxis_title="Päivä",
+            yaxis_title="Indeksi (100 = jakson alku)",
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.divider()
+
+        ratio = eth_btc_ratio(btc_eur_df, eth_eur_df)
+        ratio = filter_by_period(ratio, period)
+
+        fig = px.line(
+            ratio,
+            x="Date",
+            y="ETH_BTC",
+            title=f"ETH / BTC -suhde ({period})",
+        )
+
+        fig.update_layout(
+            xaxis_title="Päivä",
+            yaxis_title="ETH / BTC",
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tab_analysis:
         _render_signal_cards(
-            btc_vals=btc_vals,
-            drawdown_from_ath=drawdown_from_ath,
-            vol30=vol30,
-            ma200_latest=ma200_latest,
+            btc_vals=asset["vals"],
+            drawdown_from_ath=asset["drawdown"],
+            vol30=asset["vol30"],
+            ma200_latest=asset["ma200_latest"],
         )
 
         st.divider()
 
         _render_analysis(
-            btc_vals=btc_vals,
-            drawdown_from_ath=drawdown_from_ath,
-            vol30=vol30,
-            ma200_latest=ma200_latest,
-            vol_now=vol_now,
-            vol_30avg=vol_30avg,
+            asset_name=asset_name,
+            asset_vals=asset["vals"],
+            drawdown_from_ath=asset["drawdown"],
+            vol30=asset["vol30"],
+            ma200_latest=asset["ma200_latest"],
+            vol_now=asset["vol_now"],
+            vol_30avg=asset["vol_30avg"],
         )
