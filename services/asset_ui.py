@@ -267,3 +267,49 @@ def render_price_chart_with_extra_lines(
 
     st.plotly_chart(fig, use_container_width=True)
     return period, plot_df, fig
+
+def _hero_pct_color(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "#6b7280"
+    return "#15803d" if value >= 0 else "#b91c1c"
+
+
+def render_hero_card(
+    title: str,
+    value: str,
+    subtitle: str = "Nykyinen arvo",
+    metrics: list[tuple[str, str, float | None]] | None = None,
+) -> None:
+    metrics = metrics or []
+
+    with st.container(border=True):
+        st.markdown(f"### {title}")
+        st.caption(subtitle)
+        st.markdown(f"## {value}")
+
+        st.divider()
+
+        cols = st.columns(len(metrics))
+
+        for col, metric in zip(cols, metrics):
+            label, text, pct_value = metric
+
+            with col:
+                st.caption(label)
+
+                color = "#6b7280"
+                if pct_value is not None and not pd.isna(pct_value):
+                    color = "#15803d" if pct_value >= 0 else "#b91c1c"
+
+                st.markdown(
+                    f"""
+                    <span style="
+                        color:{color};
+                        font-weight:700;
+                        font-size:1.05rem;
+                    ">
+                        {text}
+                    </span>
+                    """,
+                    unsafe_allow_html=True,
+                )
