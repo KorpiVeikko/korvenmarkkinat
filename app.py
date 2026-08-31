@@ -1,6 +1,17 @@
 import streamlit as st
 
-from tabs import oil, gold, realestate, bitcoin, macro, wood, dashboard, energy, currency
+from tabs import (
+    oil,
+    gold,
+    realestate,
+    bitcoin,
+    macro,
+    wood,
+    dashboard,
+    energy,
+    currency,
+    rates,
+)
 from services.kpi import build_kpi_items
 from services.error_utils import safe_render, safe_value
 
@@ -108,7 +119,7 @@ Korvenmarkkinat ei ole vain datan näyttämistä – se on työkalu parempaan ym
         st.session_state["welcome_seen"] = True
         st.rerun()
 
-st.set_page_config(page_title="Korvenmarkkinat 🇫🇮", layout="wide")
+#st.set_page_config(page_title="Korvenmarkkinat 🇫🇮", layout="wide")
 
 top_hero()
 
@@ -119,6 +130,7 @@ PAGE_OPTIONS = [
     "🏠 Dashboard",
     "💱 Valuuttakurssit",
     "📊 Makrotalous",
+    "📈 Korot ja velkakirjat",
     "🪙 Kulta ja hopea",
     "₿ Kryptovaluutat",
     "🛢 Öljy ja polttoaineet",
@@ -161,6 +173,13 @@ elif page == "💱 Valuuttakurssit":
 
 elif page == "📊 Makrotalous":
     safe_render("Makrotalous", macro.render, show_details=SHOW_DEBUG_DETAILS)
+
+elif page == "📈 Korot ja velkakirjat":
+    safe_render(
+        "Korot ja velkakirjat",
+        rates.render,
+        show_details=SHOW_DEBUG_DETAILS,
+    )
 
 elif page == "🪙 Kulta ja hopea":
     safe_render("Kulta ja hopea", gold.render, show_details=SHOW_DEBUG_DETAILS)
